@@ -34,6 +34,8 @@ parser.add_argument('--nt', default='bernoulli', type=str, help='Noise type: gau
 parser.add_argument('--loss', default='L1', type=str, help='Loss function type')
 parser.add_argument('--num_iterations', default=3, type=int, help='Number of bank reconstruction iterations')
 parser.add_argument('--epochs_per_iter', default=1000, type=int, help='Epochs per iteration')
+parser.add_argument('--use_quality_weights', default=True, type=bool, help='Use quality-based sampling weights')
+parser.add_argument('--alpha', default=2.0, type=float, help='Sharpness of quality scoring (higher = more selective)')
 args = parser.parse_args()
 
 
@@ -90,6 +92,7 @@ def construct_pixel_bank_from_image(img_tensor, file_name_without_ext, bank_dir)
     """
     Construct pixel bank from a given image tensor.
     img_tensor: [1, C, H, W] tensor on GPU
+    Returns: topk tensor and distance tensor for quality scoring
     """
     pad_sz = WINDOW_SIZE // 2 + PATCH_SIZE // 2
     center_offset = WINDOW_SIZE // 2
@@ -108,6 +111,7 @@ def construct_pixel_bank_from_image(img_tensor, file_name_without_ext, bank_dir)
     num_blk_h = img.shape[-2] // blk_sz
     is_window_size_even = (WINDOW_SIZE % 2 == 0)
     topk_list = []
+    distance_list = []
 
     # Iterate over blocks in the image
     for blk_i in range(num_blk_w):
@@ -148,7 +152,7 @@ def construct_pixel_bank_from_image(img_tensor, file_name_without_ext, bank_dir)
             else:
                 raise ValueError(f"Unsupported loss type: {loss_type}")
 
-            _, sort_indices = torch.topk(
+            topk_distances, sort_indices = torch.topk(
                 distance,
                 k=NUM_NEIGHBORS,
                 largest=False,
@@ -165,16 +169,22 @@ def construct_pixel_bank_from_image(img_tensor, file_name_without_ext, bank_dir)
             topk = torch.gather(patch_center, dim=-3,
                                 index=sort_indices.unsqueeze(1).repeat(1, 3, 1, 1, 1))
             topk_list.append(topk)
+            distance_list.append(topk_distances)
 
     # Merge the results from all blocks to form the pixel bank
     topk = torch.cat(topk_list, dim=0)
     topk = einops.rearrange(topk, '(w1 w2) c k h w -> k c (w2 h) (w1 w)', w1=num_blk_w, w2=num_blk_h)
     topk = topk.permute(2, 3, 0, 1)
-
-    # Save pixel bank
-    np.save(os.path.join(bank_dir, file_name_without_ext), topk.cpu().numpy())
     
-    return topk
+    distances = torch.cat(distance_list, dim=0)
+    distances = einops.rearrange(distances, '(w1 w2) k h w -> k (w2 h) (w1 w)', w1=num_blk_w, w2=num_blk_h)
+    distances = distances.permute(1, 2, 0)
+
+    # Save pixel bank and distances
+    np.save(os.path.join(bank_dir, file_name_without_ext), topk.cpu().numpy())
+    np.save(os.path.join(bank_dir, file_name_without_ext + '_distances'), distances.cpu().numpy())
+    
+    return topk, distances
 
 
 def construct_pixel_bank():
@@ -196,7 +206,7 @@ def construct_pixel_bank():
         img = img.cuda()[None, ...]  # Shape: [1, C, H, W]
 
         file_name_without_ext = os.path.splitext(image_file)[0]
-        topk = construct_pixel_bank_from_image(img, file_name_without_ext, bank_dir)
+        topk, distances = construct_pixel_bank_from_image(img, file_name_without_ext, bank_dir)
 
         elapsed = time.time() - start_time
         print(f"Processed {image_file} in {elapsed:.2f} seconds. Pixel bank shape: {topk.shape}")
@@ -252,7 +262,92 @@ def loss_func(img1, img2, loss_f=nn.MSELoss()):
 
 
 # -------------------------------
-def train(model, optimizer, img_bank):
+def compute_quality_weights(distances, alpha=2.0):
+    """
+    Compute quality weights for pixel bank samples based on distances.
+    
+    Args:
+        distances: [H, W, K] tensor of distances for each pixel's K neighbors
+        alpha: Sharpness parameter (higher = more selective)
+    
+    Returns:
+        weights: [H, W, K] tensor of sampling weights
+    """
+    # Normalize distances per pixel to [0, 1]
+    # Shape: [H, W, K]
+    dist_min = distances.min(dim=-1, keepdim=True)[0]
+    dist_max = distances.max(dim=-1, keepdim=True)[0]
+    dist_range = dist_max - dist_min
+    dist_range = torch.clamp(dist_range, min=1e-8)  # Avoid division by zero
+    normalized_dist = (distances - dist_min) / dist_range
+    
+    # Quality score: Gaussian-like curve peaked at medium distances
+    # We want to favor patches with normalized distance around 0.3-0.7
+    optimal_distance = 0.5
+    quality_scores = torch.exp(-alpha * (normalized_dist - optimal_distance) ** 2)
+    
+    # Penalize very similar patches (distance ≈ 0) more heavily
+    too_similar_penalty = torch.exp(-10 * normalized_dist)
+    quality_scores = quality_scores * (1 - 0.5 * too_similar_penalty)
+    
+    # Normalize to get sampling probabilities
+    weights = quality_scores / (quality_scores.sum(dim=-1, keepdim=True) + 1e-8)
+    
+    return weights
+
+
+def train(model, optimizer, img_bank, quality_weights=None):
+    N, H, W, C = img_bank.shape
+    
+    if args.use_quality_weights and quality_weights is not None:
+        # Sample based on quality weights
+        # quality_weights shape: [H, W, N]
+        # Flatten for easier sampling
+        flat_weights = quality_weights.view(-1, N)  # [H*W, N]
+        
+        # Sample indices for each pixel based on quality weights
+        index1 = torch.multinomial(flat_weights, num_samples=1, replacement=True).view(H, W)
+        
+        # Sample second index differently (also based on weights)
+        index2 = torch.multinomial(flat_weights, num_samples=1, replacement=True).view(H, W)
+        
+        # Ensure different indices
+        eq_mask = (index2 == index1)
+        if eq_mask.any():
+            # Resample for equal indices
+            eq_positions = eq_mask.view(-1)
+            eq_weights = flat_weights[eq_positions]
+            new_samples = torch.multinomial(eq_weights, num_samples=1, replacement=True)
+            index2.view(-1)[eq_positions] = new_samples.squeeze()
+            # If still equal after one resample, just add 1 mod N
+            eq_mask = (index2 == index1)
+            if eq_mask.any():
+                index2[eq_mask] = (index2[eq_mask] + 1) % N
+    else:
+        # Original uniform sampling
+        index1 = torch.randint(0, N, size=(H, W), device=device)
+        index2 = torch.randint(0, N, size=(H, W), device=device)
+        eq_mask = (index2 == index1)
+        if eq_mask.any():
+            index2[eq_mask] = (index2[eq_mask] + 1) % N
+    
+    index1_exp = index1.unsqueeze(0).unsqueeze(-1).expand(1, H, W, C)
+    img1 = torch.gather(img_bank, 0, index1_exp)
+    img1 = img1.permute(0, 3, 1, 2)
+
+    index2_exp = index2.unsqueeze(0).unsqueeze(-1).expand(1, H, W, C)
+    img2 = torch.gather(img_bank, 0, index2_exp)
+    img2 = img2.permute(0, 3, 1, 2)
+
+    loss = loss_func(img1, img2, loss_f)
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+    return loss.item()
+
+
+def train_original(model, optimizer, img_bank):
+    """Original training function without quality weights"""
     N, H, W, C = img_bank.shape
     index1 = torch.randint(0, N, size=(H, W), device=device)
     index1_exp = index1.unsqueeze(0).unsqueeze(-1).expand(1, H, W, C)
@@ -336,6 +431,25 @@ def denoise_images():
             img_bank = img_bank[:args.mm]
             img_bank = torch.from_numpy(img_bank).to(device)
 
+            # Load distances and compute quality weights
+            quality_weights = None
+            if args.use_quality_weights:
+                dist_path = os.path.join(bank_dir, file_name_without_ext + '_distances.npy')
+                if os.path.exists(dist_path):
+                    distances_arr = np.load(dist_path)
+                    distances = torch.from_numpy(distances_arr.astype(np.float32)).to(device)
+                    # Only use distances for the selected mm samples
+                    distances = distances[..., :args.mm]
+                    quality_weights = compute_quality_weights(distances, alpha=args.alpha)
+                    print(f"Using quality-weighted sampling (alpha={args.alpha})")
+                    # Print some statistics
+                    avg_weight = quality_weights.mean().item()
+                    max_weight = quality_weights.max().item()
+                    min_weight = quality_weights.min().item()
+                    print(f"  Weight stats - Mean: {avg_weight:.4f}, Max: {max_weight:.4f}, Min: {min_weight:.4f}")
+                else:
+                    print("Distance file not found, using uniform sampling")
+
             noisy_img = img_bank[0].unsqueeze(0).permute(0, 3, 1, 2)
 
             # Reset scheduler for each iteration
@@ -347,7 +461,7 @@ def denoise_images():
 
             # Train for epochs_per_iter
             for epoch in range(args.epochs_per_iter):
-                train(model, optimizer, img_bank)
+                train(model, optimizer, img_bank, quality_weights)
                 scheduler.step()
                 
                 if (epoch + 1) % 200 == 0:
@@ -369,7 +483,7 @@ def denoise_images():
             if iteration < args.num_iterations - 1:
                 print(f"Rebuilding pixel bank with partially denoised image...")
                 start_time = time.time()
-                topk = construct_pixel_bank_from_image(denoised_img, file_name_without_ext, bank_dir)
+                topk, distances = construct_pixel_bank_from_image(denoised_img, file_name_without_ext, bank_dir)
                 elapsed = time.time() - start_time
                 print(f"Bank rebuilt in {elapsed:.2f} seconds. Shape: {topk.shape}")
 
@@ -400,7 +514,18 @@ def denoise_images():
 
 # -------------------------------
 if __name__ == "__main__":
-    print("Constructing initial pixel banks from noisy images...")
+    print("="*60)
+    print("Pixel2Pixel with Iterative Refinement & Quality Weighting")
+    print("="*60)
+    print(f"Configuration:")
+    print(f"  Dataset: {args.dataset}")
+    print(f"  Noise type: {args.nt}, level: {args.nl}")
+    print(f"  Window size: {args.ws}, Patch size: {args.ps}")
+    print(f"  Neighbors: {args.nn}, Loss: {args.loss}")
+    print(f"  Iterations: {args.num_iterations}, Epochs/iter: {args.epochs_per_iter}")
+    print(f"  Quality weighting: {args.use_quality_weights}, Alpha: {args.alpha}")
+    print("="*60)
+    print("\nConstructing initial pixel banks from noisy images...")
     construct_pixel_bank()
     print("\nStarting iterative denoising with bank reconstruction...")
     denoise_images()
