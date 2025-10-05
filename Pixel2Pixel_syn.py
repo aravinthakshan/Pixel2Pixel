@@ -20,7 +20,7 @@ import einops
 
 
 # -------------------------------
-parser = argparse.ArgumentParser('Pixel2Pixel with Online Bank Update')
+parser = argparse.ArgumentParser('Pixel2Pixel')
 parser.add_argument('--data_path', default='./data', type=str, help='Path to the data')
 parser.add_argument('--dataset', default='kodak', type=str, help='Dataset name')
 parser.add_argument('--save', default='./results', type=str, help='Directory to save pixel bank results')
@@ -29,11 +29,11 @@ parser.add_argument('--ws', default=40, type=int, help='Window size')
 parser.add_argument('--ps', default=7, type=int, help='Patch size')
 parser.add_argument('--nn', default=16, type=int, help='Number of nearest neighbors to search')
 parser.add_argument('--mm', default=8, type=int, help='Number of pixels in pixel bank to use for training')
-parser.add_argument('--nl', default=0.2, type=float, help='Noise level')
+parser.add_argument('--nl', default=0.2, type=float, help='Noise level, for saltpepper and impulse noise, enter half the noise level.')
 parser.add_argument('--nt', default='bernoulli', type=str, help='Noise type: gauss, poiss, saltpepper, bernoulli, impulse')
 parser.add_argument('--loss', default='L1', type=str, help='Loss function type')
-parser.add_argument('--num_updates', default=3, type=int, help='Number of bank update cycles')
-parser.add_argument('--epochs_per_update', default=1000, type=int, help='Epochs between bank updates')
+parser.add_argument('--num_iterations', default=3, type=int, help='Number of bank reconstruction iterations')
+parser.add_argument('--epochs_per_iter', default=1000, type=int, help='Epochs per iteration')
 args = parser.parse_args()
 
 
@@ -60,9 +60,8 @@ transform = transforms.Compose([transforms.ToTensor()])
 # Function to add noise to an image
 # -------------------------------
 def add_noise(x, noise_level):
-    """Add noise to image tensor (handles device automatically)"""
     if noise_type == 'gauss':
-        noisy = x + torch.normal(0, noise_level / 255, x.shape, device=x.device)
+        noisy = x + torch.normal(0, noise_level / 255, x.shape)
         noisy = torch.clamp(noisy, 0, 1)
     elif noise_type == 'poiss':
         noisy = torch.poisson(noise_level * x) / noise_level
@@ -85,44 +84,38 @@ def add_noise(x, noise_level):
     return noisy
 
 
+
 # -------------------------------
-# Build pixel bank from an image (can be noisy or partially denoised)
-# -------------------------------
-def build_pixel_bank(img, window_size, patch_size, num_neighbors, loss_type='L1'):
+def construct_pixel_bank_from_image(img_tensor, file_name_without_ext, bank_dir):
     """
-    Build pixel bank from input image
-    Args:
-        img: [1, C, H, W] image tensor on GPU
-        window_size: search window size
-        patch_size: patch size for matching
-        num_neighbors: number of nearest neighbors
-        loss_type: 'L1' or 'L2'
-    Returns:
-        topk: [H, W, K, C] tensor of nearest neighbor patches
+    Construct pixel bank from a given image tensor.
+    img_tensor: [1, C, H, W] tensor on GPU
     """
-    pad_sz = window_size // 2 + patch_size // 2
-    center_offset = window_size // 2
-    blk_sz = 64
+    pad_sz = WINDOW_SIZE // 2 + PATCH_SIZE // 2
+    center_offset = WINDOW_SIZE // 2
+    blk_sz = 64  # Block size for processing
+
+    img = img_tensor  # Already on GPU
 
     # Pad image and extract patches
     img_pad = F.pad(img, (pad_sz, pad_sz, pad_sz, pad_sz), mode='reflect')
-    img_unfold = F.unfold(img_pad, kernel_size=patch_size, padding=0, stride=1)
-    H_new = img.shape[-2] + window_size
-    W_new = img.shape[-1] + window_size
+    img_unfold = F.unfold(img_pad, kernel_size=PATCH_SIZE, padding=0, stride=1)
+    H_new = img.shape[-2] + WINDOW_SIZE
+    W_new = img.shape[-1] + WINDOW_SIZE
     img_unfold = einops.rearrange(img_unfold, 'b c (h w) -> b c h w', h=H_new, w=W_new)
 
     num_blk_w = img.shape[-1] // blk_sz
     num_blk_h = img.shape[-2] // blk_sz
-    is_window_size_even = (window_size % 2 == 0)
+    is_window_size_even = (WINDOW_SIZE % 2 == 0)
     topk_list = []
 
     # Iterate over blocks in the image
     for blk_i in range(num_blk_w):
         for blk_j in range(num_blk_h):
             start_h = blk_j * blk_sz
-            end_h = (blk_j + 1) * blk_sz + window_size
+            end_h = (blk_j + 1) * blk_sz + WINDOW_SIZE
             start_w = blk_i * blk_sz
-            end_w = (blk_i + 1) * blk_sz + window_size
+            end_w = (blk_i + 1) * blk_sz + WINDOW_SIZE
 
             sub_img_uf = img_unfold[..., start_h:end_h, start_w:end_w]
             sub_img_shape = sub_img_uf.shape
@@ -132,32 +125,32 @@ def build_pixel_bank(img, window_size, patch_size, num_neighbors, loss_type='L1'
             else:
                 sub_img_uf_inp = sub_img_uf
 
-            patch_windows = F.unfold(sub_img_uf_inp, kernel_size=window_size, padding=0, stride=1)
+            patch_windows = F.unfold(sub_img_uf_inp, kernel_size=WINDOW_SIZE, padding=0, stride=1)
             patch_windows = einops.rearrange(
                 patch_windows,
                 'b (c k1 k2 k3 k4) (h w) -> b (c k1 k2) (k3 k4) h w',
-                k1=patch_size, k2=patch_size, k3=window_size, k4=window_size,
+                k1=PATCH_SIZE, k2=PATCH_SIZE, k3=WINDOW_SIZE, k4=WINDOW_SIZE,
                 h=blk_sz, w=blk_sz
             )
 
             img_center = einops.rearrange(
                 sub_img_uf,
                 'b (c k1 k2) h w -> b (c k1 k2) 1 h w',
-                k1=patch_size, k2=patch_size,
+                k1=PATCH_SIZE, k2=PATCH_SIZE,
                 h=sub_img_shape[-2], w=sub_img_shape[-1]
             )
             img_center = img_center[..., center_offset:center_offset + blk_sz, center_offset:center_offset + blk_sz]
 
-            if loss_type == 'L2':
+            if args.loss == 'L2':
                 distance = torch.sum((img_center - patch_windows) ** 2, dim=1)
-            elif loss_type == 'L1':
+            elif args.loss == 'L1':
                 distance = torch.sum(torch.abs(img_center - patch_windows), dim=1)
             else:
                 raise ValueError(f"Unsupported loss type: {loss_type}")
 
             _, sort_indices = torch.topk(
                 distance,
-                k=num_neighbors,
+                k=NUM_NEIGHBORS,
                 largest=False,
                 sorted=True,
                 dim=-3
@@ -166,7 +159,7 @@ def build_pixel_bank(img, window_size, patch_size, num_neighbors, loss_type='L1'
             patch_windows_reshape = einops.rearrange(
                 patch_windows,
                 'b (c k1 k2) (k3 k4) h w -> b c (k1 k2) (k3 k4) h w',
-                k1=patch_size, k2=patch_size, k3=window_size, k4=window_size
+                k1=PATCH_SIZE, k2=PATCH_SIZE, k3=WINDOW_SIZE, k4=WINDOW_SIZE
             )
             patch_center = patch_windows_reshape[:, :, patch_windows_reshape.shape[2] // 2, ...]
             topk = torch.gather(patch_center, dim=-3,
@@ -176,13 +169,40 @@ def build_pixel_bank(img, window_size, patch_size, num_neighbors, loss_type='L1'
     # Merge the results from all blocks to form the pixel bank
     topk = torch.cat(topk_list, dim=0)
     topk = einops.rearrange(topk, '(w1 w2) c k h w -> k c (w2 h) (w1 w)', w1=num_blk_w, w2=num_blk_h)
-    topk = topk.permute(2, 3, 0, 1)  # [H, W, K, C]
+    topk = topk.permute(2, 3, 0, 1)
 
+    # Save pixel bank
+    np.save(os.path.join(bank_dir, file_name_without_ext), topk.cpu().numpy())
+    
     return topk
 
 
-# -------------------------------
-# Network Architecture
+def construct_pixel_bank():
+    bank_dir = os.path.join(args.save, '_'.join(
+        str(i) for i in [args.dataset, args.nt, args.nl, args.ws, args.ps, args.nn, args.loss]))
+    os.makedirs(bank_dir, exist_ok=True)
+
+    image_folder = os.path.join(args.data_path, args.dataset)
+    image_files = sorted(os.listdir(image_folder))
+
+    for image_file in image_files:
+        image_path = os.path.join(image_folder, image_file)
+        start_time = time.time()
+
+        # Load image and add noise
+        img = Image.open(image_path)
+        img = transform(img).unsqueeze(0)  # Shape: [1, C, H, W]
+        img = add_noise(img, noise_level).squeeze(0)
+        img = img.cuda()[None, ...]  # Shape: [1, C, H, W]
+
+        file_name_without_ext = os.path.splitext(image_file)[0]
+        topk = construct_pixel_bank_from_image(img, file_name_without_ext, bank_dir)
+
+        elapsed = time.time() - start_time
+        print(f"Processed {image_file} in {elapsed:.2f} seconds. Pixel bank shape: {topk.shape}")
+
+    print("Pixel bank construction completed for all images.")
+
 # -------------------------------
 class Network(nn.Module):
     def __init__(self, n_chan, chan_embed=64):
@@ -205,6 +225,7 @@ class Network(nn.Module):
         x = self.conv3(x)
         return torch.sigmoid(x)
 
+
     def _initialize_weights(self):
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -216,52 +237,43 @@ class Network(nn.Module):
                 init.constant_(m.bias, 0)
 
 
-# -------------------------------
-# Loss Functions
-# -------------------------------
 def mse_loss(gt: torch.Tensor, pred: torch.Tensor) -> torch.Tensor:
     return nn.MSELoss()(gt, pred)
 
+
 loss_f = nn.L1Loss() if args.loss == 'L1' else nn.MSELoss()
 
-def loss_func(img1, img2, model, loss_f):
+
+def loss_func(img1, img2, loss_f=nn.MSELoss()):
     pred1 = model(img1)
     loss = loss_f(img2, pred1)
     return loss
 
 
-# -------------------------------
-# Training Function
+
 # -------------------------------
 def train(model, optimizer, img_bank):
-    """
-    Train on random pairs from pixel bank
-    img_bank shape: [K, C, H, W] where K is number of neighbors
-    """
-    K, C, H, W = img_bank.shape
-    
-    # Randomly select two different indices for each pixel
-    index1 = torch.randint(0, K, size=(H, W), device=device)
-    index1_exp = index1.unsqueeze(0).unsqueeze(1).expand(1, C, H, W)
-    img1 = torch.gather(img_bank.unsqueeze(0), 0, index1_exp)
-    
-    index2 = torch.randint(0, K, size=(H, W), device=device)
+    N, H, W, C = img_bank.shape
+    index1 = torch.randint(0, N, size=(H, W), device=device)
+    index1_exp = index1.unsqueeze(0).unsqueeze(-1).expand(1, H, W, C)
+    img1 = torch.gather(img_bank, 0, index1_exp)  # Result shape: (1, H, W, C)
+    img1 = img1.permute(0, 3, 1, 2)
+
+    index2 = torch.randint(0, N, size=(H, W), device=device)
     eq_mask = (index2 == index1)
     if eq_mask.any():
-        index2[eq_mask] = (index2[eq_mask] + 1) % K
-    index2_exp = index2.unsqueeze(0).unsqueeze(1).expand(1, C, H, W)
-    img2 = torch.gather(img_bank.unsqueeze(0), 0, index2_exp)
+        index2[eq_mask] = (index2[eq_mask] + 1) % N
+    index2_exp = index2.unsqueeze(0).unsqueeze(-1).expand(1, H, W, C)
+    img2 = torch.gather(img_bank, 0, index2_exp)
+    img2 = img2.permute(0, 3, 1, 2)
 
-    loss = loss_func(img1, img2, model, loss_f)
+    loss = loss_func(img1, img2, loss_f)
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
     return loss.item()
 
 
-# -------------------------------
-# Testing Function
-# -------------------------------
 def test(model, noisy_img, clean_img):
     with torch.no_grad():
         pred = torch.clamp(model(noisy_img), 0, 1)
@@ -271,9 +283,9 @@ def test(model, noisy_img, clean_img):
 
 
 # -------------------------------
-# Main Denoising with Online Bank Update
-# -------------------------------
-def denoise_images_with_online_update():
+def denoise_images():
+    bank_dir = os.path.join(args.save, '_'.join(
+        str(i) for i in [args.dataset, args.nt, args.nl, args.ws, args.ps, args.nn, args.loss]))
     image_folder = os.path.join(args.data_path, args.dataset)
     image_files = sorted(os.listdir(image_folder))
 
@@ -284,144 +296,108 @@ def denoise_images_with_online_update():
     avg_SSIM = 0
 
     for image_file in image_files:
-        print(f"\n{'='*60}")
-        print(f"Processing: {image_file}")
-        print(f"{'='*60}")
-        
         image_path = os.path.join(image_folder, image_file)
-        
-        # Load clean image
         clean_img = Image.open(image_path)
         clean_img_tensor = transform(clean_img).unsqueeze(0).to(device)
         clean_img_np = io.imread(image_path)
-        
-        # Generate noisy image
-        noisy_img_tensor = add_noise(clean_img_tensor, noise_level)
-        
-        # Determine bank size based on noise characteristics
-        if noise_type == 'gauss' and noise_level == 10 or noise_type == 'bernoulli':
-            mm = 2
-        elif noise_type == 'gauss' and noise_level == 25:
-            mm = 4
+
+        file_name_without_ext = os.path.splitext(image_file)[0]
+        bank_path = os.path.join(bank_dir, file_name_without_ext)
+        if not os.path.exists(bank_path + '.npy'):
+            print(f"Pixel bank for {image_file} not found, skipping denoising.")
+            continue
+
+        # Determine mm parameter
+        if noise_type=='gauss' and noise_level==10 or noise_type=='bernoulli':
+            args.mm=2
+        elif noise_type=='gauss' and noise_level==25:
+            args.mm = 4
         else:
-            mm = 8
-        
-        # Initialize model
+            args.mm = 8
+
         n_chan = clean_img_tensor.shape[1]
+        global model
         model = Network(n_chan).to(device)
-        print(f"Number of parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
-        
+        print(f"Number of parameters for {image_file}: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
+
         optimizer = optim.AdamW(model.parameters(), lr=lr)
         
-        # ========================================
-        # ONLINE BANK UPDATE LOOP
-        # ========================================
-        total_epochs = args.num_updates * args.epochs_per_update
-        current_img = noisy_img_tensor.clone()
-        
-        for update_cycle in range(args.num_updates):
-            print(f"\n--- Bank Update Cycle {update_cycle + 1}/{args.num_updates} ---")
+        # Iterative bank reconstruction
+        for iteration in range(args.num_iterations):
+            print(f"\n{'='*60}")
+            print(f"Image: {image_file} | Iteration {iteration + 1}/{args.num_iterations}")
+            print(f"{'='*60}")
             
-            # Build/Rebuild pixel bank from current image state
-            start_bank_time = time.time()
-            print(f"Building pixel bank from {'noisy' if update_cycle == 0 else 'partially denoised'} image...")
-            
-            img_bank = build_pixel_bank(
-                current_img, 
-                WINDOW_SIZE, 
-                PATCH_SIZE, 
-                NUM_NEIGHBORS, 
-                args.loss
-            )
-            
-            # Select top mm patches
-            img_bank = img_bank.permute(2, 3, 0, 1)  # [K, C, H, W]
-            img_bank = img_bank[:mm]
-            
-            bank_time = time.time() - start_bank_time
-            print(f"Pixel bank built in {bank_time:.2f}s. Shape: {img_bank.shape}")
-            
-            # Learning rate schedule for this cycle
-            milestones = [
-                args.epochs_per_update // 3,
-                2 * args.epochs_per_update // 3,
-                5 * args.epochs_per_update // 6
-            ]
-            scheduler = MultiStepLR(optimizer, milestones=milestones, gamma=0.5)
-            
-            # Train for epochs_per_update epochs
-            print(f"Training for {args.epochs_per_update} epochs...")
-            train_start = time.time()
-            
-            for epoch in range(args.epochs_per_update):
-                loss = train(model, optimizer, img_bank)
+            # Load current pixel bank
+            img_bank_arr = np.load(bank_path + '.npy')
+            if img_bank_arr.ndim == 3:
+                img_bank_arr = np.expand_dims(img_bank_arr, axis=1)
+            img_bank = img_bank_arr.astype(np.float32).transpose((2, 0, 1, 3))
+            img_bank = img_bank[:args.mm]
+            img_bank = torch.from_numpy(img_bank).to(device)
+
+            noisy_img = img_bank[0].unsqueeze(0).permute(0, 3, 1, 2)
+
+            # Reset scheduler for each iteration
+            scheduler = MultiStepLR(optimizer, 
+                                   milestones=[int(args.epochs_per_iter*0.5), 
+                                             int(args.epochs_per_iter*0.67), 
+                                             int(args.epochs_per_iter*0.83)], 
+                                   gamma=0.5)
+
+            # Train for epochs_per_iter
+            for epoch in range(args.epochs_per_iter):
+                train(model, optimizer, img_bank)
                 scheduler.step()
                 
                 if (epoch + 1) % 200 == 0:
-                    global_epoch = update_cycle * args.epochs_per_update + epoch + 1
-                    print(f"  Epoch [{global_epoch}/{total_epochs}] Loss: {loss:.6f}")
-            
-            train_time = time.time() - train_start
-            print(f"Training completed in {train_time:.2f}s")
-            
-            # Test current performance
+                    with torch.no_grad():
+                        current_pred = torch.clamp(model(noisy_img), 0, 1)
+                        current_mse = mse_loss(clean_img_tensor, current_pred).item()
+                        current_psnr = 10 * np.log10(1 / current_mse)
+                    print(f"  Epoch {epoch+1}/{args.epochs_per_iter} - PSNR: {current_psnr:.2f} dB")
+
+            # Get partially denoised image
             with torch.no_grad():
-                current_img = torch.clamp(model(noisy_img_tensor), 0, 1)
-                mse_val = mse_loss(clean_img_tensor, current_img).item()
-                psnr = 10 * np.log10(1 / mse_val)
-                print(f"Intermediate PSNR: {psnr:.2f} dB")
+                denoised_img = torch.clamp(model(noisy_img), 0, 1)
+                current_mse = mse_loss(clean_img_tensor, denoised_img).item()
+                current_psnr = 10 * np.log10(1 / current_mse)
             
-            # For next cycle, use the denoised image to build better bank
-            # (except on last iteration where we just test)
-        
-        # ========================================
-        # Final Evaluation
-        # ========================================
-        print(f"\n--- Final Evaluation ---")
-        PSNR, out_img = test(model, noisy_img_tensor, clean_img_tensor)
-        
-        # Save denoised image
-        out_img_pil = to_pil_image(out_img.squeeze(0).cpu())
+            print(f"Iteration {iteration + 1} complete - PSNR: {current_psnr:.2f} dB")
+            
+            # Rebuild pixel bank using partially denoised image (except for last iteration)
+            if iteration < args.num_iterations - 1:
+                print(f"Rebuilding pixel bank with partially denoised image...")
+                start_time = time.time()
+                topk = construct_pixel_bank_from_image(denoised_img, file_name_without_ext, bank_dir)
+                elapsed = time.time() - start_time
+                print(f"Bank rebuilt in {elapsed:.2f} seconds. Shape: {topk.shape}")
+
+        # Final evaluation
+        PSNR, out_img = test(model, noisy_img, clean_img_tensor)
+        out_img_pil = to_pil_image(out_img.squeeze(0))
         out_img_save_path = os.path.join(args.out_image, os.path.splitext(image_file)[0] + '.png')
         out_img_pil.save(out_img_save_path)
-        
-        # Save noisy image for comparison
-        noisy_img_pil = to_pil_image(noisy_img_tensor.squeeze(0).cpu())
+
+        noisy_img_pil = to_pil_image(noisy_img.squeeze(0))
         noisy_img_save_path = os.path.join(args.out_image, os.path.splitext(image_file)[0] + '_noisy.png')
         noisy_img_pil.save(noisy_img_save_path)
-        
-        # Compute SSIM
+
         out_img_loaded = io.imread(out_img_save_path)
         SSIM, _ = compare_ssim(clean_img_np, out_img_loaded, full=True, multichannel=True)
-        
-        print(f"\nFinal Results for {image_file}:")
-        print(f"  PSNR: {PSNR:.2f} dB")
-        print(f"  SSIM: {SSIM:.4f}")
-        
+        print(f"\nFinal Results - Image: {image_file} | PSNR: {PSNR:.2f} dB | SSIM: {SSIM:.4f}")
         avg_PSNR += PSNR
         avg_SSIM += SSIM
 
-    # Print average results
     avg_PSNR /= len(image_files)
     avg_SSIM /= len(image_files)
     print(f"\n{'='*60}")
-    print(f"Average Results Across Dataset:")
-    print(f"  Average PSNR: {avg_PSNR:.2f} dB")
-    print(f"  Average SSIM: {avg_SSIM:.4f}")
+    print(f"Average PSNR: {avg_PSNR:.2f} dB, Average SSIM: {avg_SSIM:.4f}")
     print(f"{'='*60}")
-
 
 # -------------------------------
 if __name__ == "__main__":
-    print("="*60)
-    print("Online Pixel Bank Update Denoising")
-    print(f"Configuration:")
-    print(f"  Noise type: {args.nt}, level: {args.nl}")
-    print(f"  Window size: {args.ws}, Patch size: {args.ps}")
-    print(f"  Number of neighbors: {args.nn}")
-    print(f"  Bank updates: {args.num_updates}")
-    print(f"  Epochs per update: {args.epochs_per_update}")
-    print(f"  Total epochs: {args.num_updates * args.epochs_per_update}")
-    print("="*60)
-    
-    denoise_images_with_online_update()
+    print("Constructing initial pixel banks from noisy images...")
+    construct_pixel_bank()
+    print("\nStarting iterative denoising with bank reconstruction...")
+    denoise_images()
