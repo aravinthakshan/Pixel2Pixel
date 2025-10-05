@@ -234,19 +234,23 @@ def loss_func(img1, img2, model, loss_f):
 # Training Function
 # -------------------------------
 def train(model, optimizer, img_bank):
-    N, H, W, C = img_bank.shape
-    index1 = torch.randint(0, N, size=(H, W), device=device)
-    index1_exp = index1.unsqueeze(0).unsqueeze(-1).expand(1, H, W, C)
-    img1 = torch.gather(img_bank, 0, index1_exp)
-    img1 = img1.permute(0, 3, 1, 2)
-
-    index2 = torch.randint(0, N, size=(H, W), device=device)
+    """
+    Train on random pairs from pixel bank
+    img_bank shape: [K, C, H, W] where K is number of neighbors
+    """
+    K, C, H, W = img_bank.shape
+    
+    # Randomly select two different indices for each pixel
+    index1 = torch.randint(0, K, size=(H, W), device=device)
+    index1_exp = index1.unsqueeze(0).unsqueeze(1).expand(1, C, H, W)
+    img1 = torch.gather(img_bank.unsqueeze(0), 0, index1_exp)
+    
+    index2 = torch.randint(0, K, size=(H, W), device=device)
     eq_mask = (index2 == index1)
     if eq_mask.any():
-        index2[eq_mask] = (index2[eq_mask] + 1) % N
-    index2_exp = index2.unsqueeze(0).unsqueeze(-1).expand(1, H, W, C)
-    img2 = torch.gather(img_bank, 0, index2_exp)
-    img2 = img2.permute(0, 3, 1, 2)
+        index2[eq_mask] = (index2[eq_mask] + 1) % K
+    index2_exp = index2.unsqueeze(0).unsqueeze(1).expand(1, C, H, W)
+    img2 = torch.gather(img_bank.unsqueeze(0), 0, index2_exp)
 
     loss = loss_func(img1, img2, model, loss_f)
     optimizer.zero_grad()
