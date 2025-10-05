@@ -60,8 +60,9 @@ transform = transforms.Compose([transforms.ToTensor()])
 # Function to add noise to an image
 # -------------------------------
 def add_noise(x, noise_level):
+    """Add noise to image tensor (handles device automatically)"""
     if noise_type == 'gauss':
-        noisy = x + torch.normal(0, noise_level / 255, x.shape)
+        noisy = x + torch.normal(0, noise_level / 255, x.shape, device=x.device)
         noisy = torch.clamp(noisy, 0, 1)
     elif noise_type == 'poiss':
         noisy = torch.poisson(noise_level * x) / noise_level
