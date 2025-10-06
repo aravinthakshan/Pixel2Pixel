@@ -155,7 +155,7 @@ if __name__ == '__main__':
     LOSS_TYPE = args.loss_type
 
     img = Image.open(args.image_path)
-    img_tensor = transform(img).unsqueeze(0).cuda()[None, ...]
+    img_tensor = transform(img).unsqueeze(0).cuda()
     img_tensor = add_noise(img_tensor, args.noise_level, args.noise_type)
 
     file_name_without_ext = os.path.splitext(os.path.basename(args.image_path))[0]
