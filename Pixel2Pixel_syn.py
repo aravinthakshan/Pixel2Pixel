@@ -15,9 +15,7 @@ import torch.nn.init as init
 
 import torchvision.transforms as transforms
 from torchvision.transforms.functional import to_pil_image
-
 import einops
-
 
 # -------------------------------
 parser = argparse.ArgumentParser('Pixel2Pixel')
@@ -47,7 +45,6 @@ parser.add_argument('--distance_alphas', default='2.0,2.5,3.0', type=str,
                    help='Comma-separated alpha values for distance-based sampling per iteration (e.g., "2.0,2.5,3.0")')
 
 args = parser.parse_args()
-
 
 # -------------------------------
 torch.manual_seed(123)
@@ -368,7 +365,6 @@ def test(model, noisy_img, clean_img):
         mse_val = mse_loss(clean_img, pred).item()
         psnr = 10 * np.log10(1 / mse_val)
     return psnr, pred
-
 
 # -------------------------------
 def denoise_images():
