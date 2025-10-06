@@ -570,12 +570,8 @@ def objective(trial, noise_type, noise_level):
     # Sample hyperparameters
     params = {
         'layer_schedule': trial.suggest_categorical('layer_schedule', OPTUNA_CONFIG['search_space']['layer_schedule']),
-        'alpha': trial.suggest_categorical('alpha', OPTUNA_CONFIG['search_space']['alpha']),
-        'curriculum_start': trial.suggest_categorical('curriculum_start', OPTUNA_CONFIG['search_space']['curriculum_start']),
-        'curriculum_end': trial.suggest_categorical('curriculum_end', OPTUNA_CONFIG['search_space']['curriculum_end']),
         'num_iterations': trial.suggest_categorical('num_iterations', OPTUNA_CONFIG['search_space']['num_iterations']),
         'epochs_per_iter': trial.suggest_categorical('epochs_per_iter', OPTUNA_CONFIG['search_space']['epochs_per_iter']),
-        'lr': trial.suggest_categorical('lr', OPTUNA_CONFIG['search_space']['lr']),
         'chan_embed': trial.suggest_categorical('chan_embed', OPTUNA_CONFIG['search_space']['chan_embed']),
     }
     
