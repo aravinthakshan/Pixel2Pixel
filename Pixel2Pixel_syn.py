@@ -299,17 +299,77 @@ def loss_func(img1, img2, loss_f=nn.MSELoss()):
 
 
 # -------------------------------
-def compute_quality_weights_distance(distances, alpha=2.0):
+# def compute_quality_weights_distance(distances, alpha=2.0):
+#     """
+#     Compute quality weights for pixel bank samples based on distances.
+    
+#     Args:
+#         distances: [H, W, K] tensor of distances for each pixel's K neighbors
+#         alpha: Sharpness parameter (higher = more selective)
+    
+#     Returns:
+#         weights: [H, W, K] tensor of sampling weights
+#     """
+#     # Normalize distances per pixel to [0, 1]
+#     dist_min = distances.min(dim=-1, keepdim=True)[0]
+#     dist_max = distances.max(dim=-1, keepdim=True)[0]
+#     dist_range = dist_max - dist_min
+#     dist_range = torch.clamp(dist_range, min=1e-8)
+#     normalized_dist = (distances - dist_min) / dist_range
+    
+#     # Quality score: Gaussian-like curve peaked at medium distances
+#     optimal_distance = 0.5
+#     quality_scores = torch.exp(-alpha * (normalized_dist - optimal_distance) ** 2)
+    
+#     # Penalize very similar patches
+#     too_similar_penalty = torch.exp(-10 * normalized_dist)
+#     quality_scores = quality_scores * (1 - 0.5 * too_similar_penalty)
+    
+#     # Normalize to get sampling probabilities
+#     weights = quality_scores / (quality_scores.sum(dim=-1, keepdim=True) + 1e-8)
+    
+#     return weights
+
+
+def compute_quality_weights_distance(distances, alpha=2.0, iteration=0, num_iterations=3, 
+                                    noise_level=0.2, noise_type='gauss'):
     """
-    Compute quality weights for pixel bank samples based on distances.
+    Compute quality weights for pixel bank samples based on distances with adaptive optimal distance.
     
     Args:
         distances: [H, W, K] tensor of distances for each pixel's K neighbors
         alpha: Sharpness parameter (higher = more selective)
+        iteration: Current iteration (0-indexed)
+        num_iterations: Total number of iterations
+        noise_level: Noise level (0-1 scale)
+        noise_type: Type of noise ('gauss', 'bernoulli', 'saltpepper', 'impulse', 'poisson')
     
     Returns:
         weights: [H, W, K] tensor of sampling weights
     """
+    # Iteration progress ratio
+    iter_ratio = iteration / max(num_iterations - 1, 1)
+    
+    # Base optimal distance using sigmoid schedule
+    base_optimal = 0.2 + 0.5 / (1 + torch.exp(torch.tensor(-10.0 * (iter_ratio - 0.5))))
+    
+    # Noise type adjustment factors
+    noise_factors = {
+        'gauss': 1.0,
+        'bernoulli': 0.85,      # More conservative
+        'saltpepper': 1.15,     # More aggressive
+        'impulse': 1.15,        # More aggressive
+        'poisson': 1.0
+    }
+    noise_factor = noise_factors.get(noise_type, 1.0)
+    
+    # Noise level adjustment (assuming noise_level in [0, 0.5] range)
+    level_adjustment = -0.15 * (noise_level / 0.5)
+    
+    # Compute final optimal distance
+    optimal_distance = base_optimal * noise_factor + level_adjustment
+    optimal_distance = torch.clamp(optimal_distance, min=0.15, max=0.75)
+    
     # Normalize distances per pixel to [0, 1]
     dist_min = distances.min(dim=-1, keepdim=True)[0]
     dist_max = distances.max(dim=-1, keepdim=True)[0]
@@ -317,11 +377,10 @@ def compute_quality_weights_distance(distances, alpha=2.0):
     dist_range = torch.clamp(dist_range, min=1e-8)
     normalized_dist = (distances - dist_min) / dist_range
     
-    # Quality score: Gaussian-like curve peaked at medium distances
-    optimal_distance = 0.5
+    # Quality score: Gaussian-like curve peaked at adaptive optimal distance
     quality_scores = torch.exp(-alpha * (normalized_dist - optimal_distance) ** 2)
     
-    # Penalize very similar patches
+    # Penalize very similar patches (too close to 0)
     too_similar_penalty = torch.exp(-10 * normalized_dist)
     quality_scores = quality_scores * (1 - 0.5 * too_similar_penalty)
     
@@ -329,7 +388,6 @@ def compute_quality_weights_distance(distances, alpha=2.0):
     weights = quality_scores / (quality_scores.sum(dim=-1, keepdim=True) + 1e-8)
     
     return weights
-
 
 def compute_quality_weights(distances, patch_features=None, lambda_param=0.2, alpha=2.0):
     """
@@ -519,11 +577,19 @@ def denoise_images():
                     distances = distances[..., :args.mm]
                     
                     if args.use == "MMR":
-                        quality_weights = compute_quality_weights(
+                        # quality_weights = compute_quality_weights(
+                        #     distances, 
+                        #     patch_features=None, 
+                        #     lambda_param=mmr_lambda,
+                        #     alpha=2.0
+                        # )
+                        quality_weights = compute_quality_weights_distance(
                             distances, 
-                            patch_features=None, 
-                            lambda_param=mmr_lambda,
-                            alpha=2.0
+                            alpha=distance_alpha,
+                            iteration=iteration,  
+                            num_iterations=args.num_iterations, 
+                            noise_level=args.nl,  
+                            noise_type=args.nt  
                         )
                         print(f"Using MMR sampling (lambda={mmr_lambda:.2f})")
                     else:
