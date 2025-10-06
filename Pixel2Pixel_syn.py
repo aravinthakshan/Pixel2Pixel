@@ -369,12 +369,12 @@ def train(model, optimizer, img_bank, quality_weights=None):
 #     return loss.item()
 
 
-# def test(model, noisy_img, clean_img):
-#     with torch.no_grad():
-#         pred = torch.clamp(model(noisy_img), 0, 1)
-#         mse_val = mse_loss(clean_img, pred).item()
-#         psnr = 10 * np.log10(1 / mse_val)
-#     return psnr, pred
+def test(model, noisy_img, clean_img):
+    with torch.no_grad():
+        pred = torch.clamp(model(noisy_img), 0, 1)
+        mse_val = mse_loss(clean_img, pred).item()
+        psnr = 10 * np.log10(1 / mse_val)
+    return psnr, pred
 
 
 # -------------------------------
