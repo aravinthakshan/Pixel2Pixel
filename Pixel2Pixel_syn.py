@@ -416,10 +416,10 @@ def denoise_images():
             mmr_lambda = mmr_lambdas_list[iteration]
             distance_alpha = distance_alphas_list[iteration]
             
-            if args.progressive_growing:
-                print(f"Network: {num_layers} conv layers")
-            print(f"Sampling: Distance-based (alpha={distance_alpha:.2f})")
-            print(f"{'='*60}")
+            # if args.progressive_growing:
+            #     print(f"Network: {num_layers} conv layers")
+            # print(f"Sampling: Distance-based (alpha={distance_alpha:.2f})")
+            # print(f"{'='*60}")
             
             # Create network with specified number of layers
             global model
