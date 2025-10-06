@@ -474,7 +474,8 @@ def denoise_images():
 
                 # Train for epochs_per_iter
                 current_mse = 0
-                for epoch in range(args.epochs_per_iter):
+                epoch = 0
+                while(epoch <(args.epochs_per_iter)):
                     train(model, optimizer, img_bank, quality_weights)
                     scheduler.step()
                     
@@ -486,9 +487,11 @@ def denoise_images():
                             if (current_mse-prev_mse==0.0):
                                 print("Restarting trianing with sigmoid turned off")
                                 model.use_sigmoid = False
-                                break
+                                epoch=0
                             current_psnr = 10 * np.log10(1 / current_mse)
                         print(f"  Epoch {epoch+1}/{args.epochs_per_iter} - PSNR: {current_psnr:.2f} dB")
+                    
+                    epoch+=1
 
                 # Get partially denoised image
                 with torch.no_grad():
