@@ -37,7 +37,6 @@ parser.add_argument('--epochs_per_iter', default=1000, type=int, help='Epochs pe
 parser.add_argument('--use_quality_weights', default=True, type=bool, help='Use quality-based sampling weights')
 parser.add_argument('--alpha', default=2.0, type=float, help='Sharpness of quality scoring (higher = more selective)')
 parser.add_argument('--progressive_growing', default=False, type=bool, help='Use progressive network growing')
-parser.add_argument('--use', default="distance", type=str, help='Sampling Strategy: MMR or distance')
 
 # Progressive growing parameters
 parser.add_argument('--nn_layers', default='6,9,12', type=str, 
@@ -330,60 +329,6 @@ def compute_quality_weights_distance(distances, alpha=2.0):
     
     return weights
 
-
-def compute_quality_weights(distances, patch_features=None, lambda_param=0.2, alpha=2.0):
-    """
-    Compute MMR-based quality weights for pixel bank samples.
-    
-    Args:
-        distances: [H, W, K] tensor of distances for each pixel's K neighbors
-        patch_features: [H, W, K, D] optional tensor of patch features
-        lambda_param: Trade-off between relevance and diversity (0=diversity only, 1=relevance only)
-        alpha: Sharpness parameter for converting scores to weights
-    
-    Returns:
-        weights: [H, W, K] tensor of sampling weights based on MMR scores
-    """
-    H, W, K = distances.shape
-    device = distances.device
-    
-    # Normalize distances to [0, 1] for relevance scores
-    dist_min = distances.min(dim=-1, keepdim=True)[0]
-    dist_max = distances.max(dim=-1, keepdim=True)[0]
-    dist_range = torch.clamp(dist_max - dist_min, min=1e-8)
-    normalized_dist = (distances - dist_min) / dist_range
-    
-    # Relevance score: Lower distance = higher relevance
-    relevance = 1.0 - normalized_dist
-    
-    # Compute diversity scores
-    if patch_features is not None:
-        feat_norm = F.normalize(patch_features, p=2, dim=-1)
-        similarity_matrix = torch.einsum('hwid,hwjd->hwij', feat_norm, feat_norm)
-        diversity = 1.0 - similarity_matrix.mean(dim=-1)
-    else:
-        # Approximate diversity using distance distribution
-        dist_mean = distances.mean(dim=-1, keepdim=True)
-        dist_variance = ((distances - dist_mean) ** 2).mean(dim=-1, keepdim=True)
-        dist_std = torch.sqrt(dist_variance + 1e-8)
-        diversity = torch.abs(distances - dist_mean) / (dist_std + 1e-8)
-        diversity = torch.tanh(diversity)
-    
-    # MMR score
-    mmr_scores = lambda_param * relevance + (1 - lambda_param) * diversity
-    
-    # Apply sharpening
-    temperature = 1.0 / alpha
-    mmr_scores_scaled = mmr_scores / temperature
-    weights = F.softmax(mmr_scores_scaled, dim=-1)
-    
-    # Boost high-scoring samples
-    weights = weights ** (1.0 + alpha * 0.1)
-    weights = weights / (weights.sum(dim=-1, keepdim=True) + 1e-8)
-    
-    return weights
-
-
 def train(model, optimizer, img_bank, quality_weights=None):
     N, H, W, C = img_bank.shape
     
@@ -518,20 +463,11 @@ def denoise_images():
                     distances = torch.from_numpy(distances_arr.astype(np.float32)).to(device)
                     distances = distances[..., :args.mm]
                     
-                    if args.use == "MMR":
-                        quality_weights = compute_quality_weights(
-                            distances, 
-                            patch_features=None, 
-                            lambda_param=mmr_lambda,
-                            alpha=2.0
-                        )
-                        print(f"Using MMR sampling (lambda={mmr_lambda:.2f})")
-                    else:
-                        quality_weights = compute_quality_weights_distance(
+                    quality_weights = compute_quality_weights_distance(
                             distances, 
                             alpha=distance_alpha
                         )
-                        print(f"Using distance-based sampling (alpha={distance_alpha:.2f})")
+                    print(f"Using distance-based sampling (alpha={distance_alpha:.2f})")
                     
                     # Print statistics
                     avg_weight = quality_weights.mean().item()
@@ -623,14 +559,9 @@ if __name__ == "__main__":
     
     if args.use_quality_weights:
         print(f"  Quality weighting: ENABLED")
-        if args.use == "MMR":
-            _, mmr_lambdas_list, _ = parse_iteration_params()
-            print(f"  Sampling strategy: MMR")
-            print(f"  MMR lambda per iteration: {mmr_lambdas_list}")
-        else:
-            _, _, distance_alphas_list = parse_iteration_params()
-            print(f"  Sampling strategy: Distance-based")
-            print(f"  Distance alpha per iteration: {distance_alphas_list}")
+        _, _, distance_alphas_list = parse_iteration_params()
+        print(f"  Sampling strategy: Distance-based")
+        print(f"  Distance alpha per iteration: {distance_alphas_list}")
     else:
         print(f"  Quality weighting: DISABLED (uniform sampling)")
     
