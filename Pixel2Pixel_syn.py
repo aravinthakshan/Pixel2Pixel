@@ -36,7 +36,7 @@ parser.add_argument('--num_iterations', default=3, type=int, help='Number of ban
 parser.add_argument('--epochs_per_iter', default=1000, type=int, help='Epochs per iteration')
 parser.add_argument('--use_quality_weights', default=True, type=bool, help='Use quality-based sampling weights')
 parser.add_argument('--alpha', default=2.0, type=float, help='Sharpness of quality scoring (higher = more selective)')
-parser.add_argument('--progressive_growing', default=True, type=bool, help='Use progressive network growing')
+parser.add_argument('--progressive_growing', default=False, type=bool, help='Use progressive network growing')
 args = parser.parse_args()
 
 
