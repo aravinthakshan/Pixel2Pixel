@@ -37,6 +37,9 @@ parser.add_argument('--epochs_per_iter', default=1000, type=int, help='Epochs pe
 parser.add_argument('--use_quality_weights', default=True, type=bool, help='Use quality-based sampling weights')
 parser.add_argument('--alpha', default=2.0, type=float, help='Sharpness of quality scoring (higher = more selective)')
 parser.add_argument('--progressive_growing', default=True, type=bool, help='Use progressive network growing')
+parser.add_argument('--curriculum_learning', default=True, type=bool, help='Use curriculum learning for sample selection')
+parser.add_argument('--curriculum_start', default=1.0, type=float, help='Starting curriculum threshold (1.0 = all samples)')
+parser.add_argument('--curriculum_end', default=0.25, type=float, help='Ending curriculum threshold (0.25 = top 25%)')
 args = parser.parse_args()
 
 
@@ -216,26 +219,60 @@ def construct_pixel_bank():
 
 # -------------------------------
 class Network(nn.Module):
-    def __init__(self, n_chan, chan_embed=64):
+    def __init__(self, n_chan, chan_embed=64, num_layers=6):
         super(Network, self).__init__()
+        self.num_layers = num_layers
         self.act = nn.LeakyReLU(negative_slope=0.2, inplace=True)
+        
+        # Always create all layers, but we'll control which ones are active
         self.conv1 = nn.Conv2d(n_chan, chan_embed, 3, padding=1)
         self.conv2 = nn.Conv2d(chan_embed, chan_embed, 3, padding=1)
         self.conv4 = nn.Conv2d(chan_embed, chan_embed, 3, padding=1)
         self.conv5 = nn.Conv2d(chan_embed, chan_embed, 3, padding=1)
         self.conv6 = nn.Conv2d(chan_embed, chan_embed, 3, padding=1)
         self.conv3 = nn.Conv2d(chan_embed, n_chan, 1)
+        
+        # Layer activation flags (will be set externally)
+        self.active_layers = num_layers
+        
         self._initialize_weights()
 
     def forward(self, x):
         x = self.act(self.conv1(x))
         x = self.act(self.conv2(x))
-        x = self.act(self.conv4(x))
-        x = self.act(self.conv5(x))
-        x = self.act(self.conv6(x))
+        
+        # Progressive layers - only use if active
+        if self.active_layers >= 4:
+            x = self.act(self.conv4(x))
+        if self.active_layers >= 5:
+            x = self.act(self.conv5(x))
+        if self.active_layers >= 6:
+            x = self.act(self.conv6(x))
+        
         x = self.conv3(x)
         return torch.sigmoid(x)
 
+    def set_active_layers(self, num_layers):
+        """Set number of active layers (3-6)"""
+        self.active_layers = max(3, min(6, num_layers))
+        print(f"  Network depth set to {self.active_layers} layers")
+
+    def get_active_parameters(self):
+        """Return only parameters from active layers"""
+        params = []
+        # Always active: conv1, conv2, conv3
+        params.extend(list(self.conv1.parameters()))
+        params.extend(list(self.conv2.parameters()))
+        params.extend(list(self.conv3.parameters()))
+        
+        if self.active_layers >= 4:
+            params.extend(list(self.conv4.parameters()))
+        if self.active_layers >= 5:
+            params.extend(list(self.conv5.parameters()))
+        if self.active_layers >= 6:
+            params.extend(list(self.conv6.parameters()))
+        
+        return params
 
     def _initialize_weights(self):
         for m in self.modules():
@@ -413,16 +450,52 @@ def denoise_images():
 
         n_chan = clean_img_tensor.shape[1]
         global model
-        model = Network(n_chan).to(device)
-        print(f"Number of parameters for {image_file}: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
-
-        optimizer = optim.AdamW(model.parameters(), lr=lr)
         
+        # Create full network (all 6 layers)
+        model = Network(n_chan, num_layers=6).to(device)
+        
+        # Calculate layer progression if using progressive growing
+        if args.progressive_growing:
+            # Start with 3 layers, grow to 6 layers over iterations
+            layer_schedule = []
+            for i in range(args.num_iterations):
+                # Linear progression: 3 -> 4 -> 5 -> 6
+                if args.num_iterations == 1:
+                    layers = 6
+                elif args.num_iterations == 2:
+                    layers = 4 if i == 0 else 6
+                elif args.num_iterations == 3:
+                    layers = [3, 5, 6][i]
+                else:
+                    # For more iterations, distribute evenly
+                    progress = i / (args.num_iterations - 1)
+                    layers = int(3 + progress * 3)
+                layer_schedule.append(layers)
+            print(f"Progressive growing schedule: {layer_schedule}")
+        else:
+            layer_schedule = [6] * args.num_iterations
+            print(f"Using full network (6 layers) for all iterations")
+        
+        print(f"Total network parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
+
         # Iterative bank reconstruction
         for iteration in range(args.num_iterations):
             print(f"\n{'='*60}")
             print(f"Image: {image_file} | Iteration {iteration + 1}/{args.num_iterations}")
             print(f"{'='*60}")
+            
+            # Set network depth for this iteration
+            current_layers = layer_schedule[iteration]
+            model.set_active_layers(current_layers)
+            
+            # Create optimizer with only active parameters
+            if args.progressive_growing:
+                active_params = model.get_active_parameters()
+                optimizer = optim.AdamW(active_params, lr=lr)
+                active_param_count = sum(p.numel() for p in active_params if p.requires_grad)
+                print(f"  Active parameters: {active_param_count:,}")
+            else:
+                optimizer = optim.AdamW(model.parameters(), lr=lr)
             
             # Load current pixel bank
             img_bank_arr = np.load(bank_path + '.npy')
@@ -442,14 +515,14 @@ def denoise_images():
                     # Only use distances for the selected mm samples
                     distances = distances[..., :args.mm]
                     quality_weights = compute_quality_weights(distances, alpha=args.alpha)
-                    print(f"Using quality-weighted sampling (alpha={args.alpha})")
+                    print(f"  Using quality-weighted sampling (alpha={args.alpha})")
                     # Print some statistics
                     avg_weight = quality_weights.mean().item()
                     max_weight = quality_weights.max().item()
                     min_weight = quality_weights.min().item()
                     print(f"  Weight stats - Mean: {avg_weight:.4f}, Max: {max_weight:.4f}, Min: {min_weight:.4f}")
                 else:
-                    print("Distance file not found, using uniform sampling")
+                    print("  Distance file not found, using uniform sampling")
 
             noisy_img = img_bank[0].unsqueeze(0).permute(0, 3, 1, 2)
 
@@ -516,7 +589,7 @@ def denoise_images():
 # -------------------------------
 if __name__ == "__main__":
     print("="*60)
-    print("Pixel2Pixel with Iterative Refinement & Quality Weighting")
+    print("Pixel2Pixel with Advanced Iterative Refinement")
     print("="*60)
     print(f"Configuration:")
     print(f"  Dataset: {args.dataset}")
@@ -525,6 +598,7 @@ if __name__ == "__main__":
     print(f"  Neighbors: {args.nn}, Loss: {args.loss}")
     print(f"  Iterations: {args.num_iterations}, Epochs/iter: {args.epochs_per_iter}")
     print(f"  Quality weighting: {args.use_quality_weights}, Alpha: {args.alpha}")
+    print(f"  Progressive growing: {args.progressive_growing}")
     print("="*60)
     print("\nConstructing initial pixel banks from noisy images...")
     construct_pixel_bank()
