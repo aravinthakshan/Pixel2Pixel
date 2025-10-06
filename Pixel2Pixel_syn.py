@@ -5,7 +5,6 @@ import numpy as np
 from PIL import Image
 from skimage import io
 from skimage.metrics import peak_signal_noise_ratio as compare_psnr, structural_similarity as compare_ssim
-from sklearn.metrics.pairwise import cosine_similarity
 
 import torch
 import torch.nn as nn
@@ -16,6 +15,7 @@ import torch.nn.init as init
 
 import torchvision.transforms as transforms
 from torchvision.transforms.functional import to_pil_image
+
 import einops
 
 
@@ -36,7 +36,7 @@ parser.add_argument('--num_iterations', default=3, type=int, help='Number of ban
 parser.add_argument('--epochs_per_iter', default=1000, type=int, help='Epochs per iteration')
 parser.add_argument('--use_quality_weights', default=True, type=bool, help='Use quality-based sampling weights')
 parser.add_argument('--alpha', default=2.0, type=float, help='Sharpness of quality scoring (higher = more selective)')
-parser.add_argument('--progressive_growing', default=False, type=bool, help='Use progressive network growing')
+parser.add_argument('--progressive_growing', default=True, type=bool, help='Use progressive network growing')
 args = parser.parse_args()
 
 
@@ -89,62 +89,21 @@ def add_noise(x, noise_level):
 
 # This is the only change Working Condition
 # -------------------------------
-
-def mmr_select_patches(center_patch, candidate_patches, lambda_param=0.3, topk=12):
-    """
-    Select topk diverse patches using Maximal Marginal Relevance.
-    
-    Args:
-        center_patch: [C*P*P] tensor, flattened central patch
-        candidate_patches: [N, C*P*P] tensor, flattened candidate patches
-        lambda_param: float, 0=diversity, 1=relevance
-        topk: int, number of patches to select
-    
-    Returns:
-        selected_indices: [topk] tensor of indices
-    """
-    device = center_patch.device
-    n_candidates = candidate_patches.shape[0]
-    
-    # Compute relevance: similarity to center patch
-    center_cpu = center_patch.cpu().numpy()
-    cand_cpu = candidate_patches.cpu().numpy()
-    sim_to_center = cosine_similarity([center_cpu], cand_cpu).flatten()  # [N]
-    
-    # Start with most relevant patch
-    selected = [np.argmax(sim_to_center)]
-    
-    while len(selected) < topk and len(selected) < n_candidates:
-        mmr_scores = []
-        for i in range(n_candidates):
-            if i in selected:
-                mmr_scores.append(-np.inf)
-                continue
-            relevance = sim_to_center[i]
-            # Compute max similarity to already selected patches
-            sim_to_selected = cosine_similarity(
-                cand_cpu[i:i+1], cand_cpu[selected]
-            ).flatten()
-            diversity = np.max(sim_to_selected)
-            mmr_score = lambda_param * relevance - (1 - lambda_param) * diversity
-            mmr_scores.append(mmr_score)
-        next_idx = np.argmax(mmr_scores)
-        selected.append(next_idx)
-    
-    return torch.tensor(selected, device=device)
-
-
 def construct_pixel_bank_from_image(img_tensor, file_name_without_ext, bank_dir):
     """
-    Construct pixel bank using MMR for diverse patch selection.
+    Construct pixel bank from a given image tensor.
+    img_tensor: [1, C, H, W] tensor on GPU
+    Returns: topk tensor and distance tensor for quality scoring
     """
     pad_sz = WINDOW_SIZE // 2 + PATCH_SIZE // 2
     center_offset = WINDOW_SIZE // 2
-    blk_sz = 64
+    blk_sz = 64  # Block size for processing
 
-    img = img_tensor
-    img_pad = torch.nn.functional.pad(img, (pad_sz, pad_sz, pad_sz, pad_sz), mode='reflect')
-    img_unfold = torch.nn.functional.unfold(img_pad, kernel_size=PATCH_SIZE, padding=0, stride=1)
+    img = img_tensor  # Already on GPU
+
+    # Pad image and extract patches
+    img_pad = F.pad(img, (pad_sz, pad_sz, pad_sz, pad_sz), mode='reflect')
+    img_unfold = F.unfold(img_pad, kernel_size=PATCH_SIZE, padding=0, stride=1)
     H_new = img.shape[-2] + WINDOW_SIZE
     W_new = img.shape[-1] + WINDOW_SIZE
     img_unfold = einops.rearrange(img_unfold, 'b c (h w) -> b c h w', h=H_new, w=W_new)
@@ -155,6 +114,7 @@ def construct_pixel_bank_from_image(img_tensor, file_name_without_ext, bank_dir)
     topk_list = []
     distance_list = []
 
+    # Iterate over blocks in the image
     for blk_i in range(num_blk_w):
         for blk_j in range(num_blk_h):
             start_h = blk_j * blk_sz
@@ -170,7 +130,7 @@ def construct_pixel_bank_from_image(img_tensor, file_name_without_ext, bank_dir)
             else:
                 sub_img_uf_inp = sub_img_uf
 
-            patch_windows = torch.nn.functional.unfold(sub_img_uf_inp, kernel_size=WINDOW_SIZE, padding=0, stride=1)
+            patch_windows = F.unfold(sub_img_uf_inp, kernel_size=WINDOW_SIZE, padding=0, stride=1)
             patch_windows = einops.rearrange(
                 patch_windows,
                 'b (c k1 k2 k3 k4) (h w) -> b (c k1 k2) (k3 k4) h w',
@@ -186,54 +146,47 @@ def construct_pixel_bank_from_image(img_tensor, file_name_without_ext, bank_dir)
             )
             img_center = img_center[..., center_offset:center_offset + blk_sz, center_offset:center_offset + blk_sz]
 
-            # Flatten patches for MMR
-            patch_windows_flat = einops.rearrange(
+            if args.loss == 'L2':
+                distance = torch.sum((img_center - patch_windows) ** 2, dim=1)
+            elif args.loss == 'L1':
+                distance = torch.sum(torch.abs(img_center - patch_windows), dim=1)
+            else:
+                raise ValueError(f"Unsupported loss type: {loss_type}")
+
+            topk_distances, sort_indices = torch.topk(
+                distance,
+                k=NUM_NEIGHBORS,
+                largest=False,
+                sorted=True,
+                dim=-3
+            )
+
+            patch_windows_reshape = einops.rearrange(
                 patch_windows,
-                'b (c p1 p2) (w1 w2) h w -> (h w) (c p1 p2 w1 w2)',
-                p1=PATCH_SIZE, p2=PATCH_SIZE, w1=WINDOW_SIZE, w2=WINDOW_SIZE
+                'b (c k1 k2) (k3 k4) h w -> b c (k1 k2) (k3 k4) h w',
+                k1=PATCH_SIZE, k2=PATCH_SIZE, k3=WINDOW_SIZE, k4=WINDOW_SIZE
             )
-            img_center_flat = einops.rearrange(
-                img_center,
-                'b (c p1 p2) 1 h w -> (h w) (c p1 p2)',
-                p1=PATCH_SIZE, p2=PATCH_SIZE
-            )
-
-            topk_patches = []
-            topk_distances = []
-
-            for i in range(patch_windows_flat.shape[0]):
-                center = img_center_flat[i]
-                candidates = patch_windows_flat[i].repeat(NUM_NEIGHBORS, 1)  # dummy repeat for shape
-                # Use MMR to select diverse patches
-                selected_indices = mmr_select_patches(
-                    center, patch_windows_flat[i:i+1].repeat(NUM_NEIGHBORS, 1),
-                    lambda_param=0.3, topk=NUM_NEIGHBORS
-                )
-                selected_patches = patch_windows_flat[i][selected_indices]
-                topk_patches.append(selected_patches)
-                # Compute L2 distance for compatibility
-                dist = torch.sum((center - selected_patches) ** 2, dim=-1)
-                topk_distances.append(dist)
-
-            topk_patches = torch.stack(topk_patches)
-            topk_distances = torch.stack(topk_distances)
-            topk_list.append(topk_patches)
+            patch_center = patch_windows_reshape[:, :, patch_windows_reshape.shape[2] // 2, ...]
+            topk = torch.gather(patch_center, dim=-3,
+                                index=sort_indices.unsqueeze(1).repeat(1, 3, 1, 1, 1))
+            topk_list.append(topk)
             distance_list.append(topk_distances)
 
-    # Merge results
+    # Merge the results from all blocks to form the pixel bank
     topk = torch.cat(topk_list, dim=0)
-    topk = einops.rearrange(topk, '(w1 w2) k c -> k c w2 w1', w1=num_blk_w, w2=num_blk_h)
+    topk = einops.rearrange(topk, '(w1 w2) c k h w -> k c (w2 h) (w1 w)', w1=num_blk_w, w2=num_blk_h)
     topk = topk.permute(2, 3, 0, 1)
     
     distances = torch.cat(distance_list, dim=0)
-    distances = einops.rearrange(distances, '(w1 w2) k -> k w2 w1', w1=num_blk_w, w2=num_blk_h)
+    distances = einops.rearrange(distances, '(w1 w2) k h w -> k (w2 h) (w1 w)', w1=num_blk_w, w2=num_blk_h)
     distances = distances.permute(1, 2, 0)
 
-    # Save
+    # Save pixel bank and distances
     np.save(os.path.join(bank_dir, file_name_without_ext), topk.cpu().numpy())
     np.save(os.path.join(bank_dir, file_name_without_ext + '_distances'), distances.cpu().numpy())
     
     return topk, distances
+
 
 def construct_pixel_bank():
     bank_dir = os.path.join(args.save, '_'.join(
