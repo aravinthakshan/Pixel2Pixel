@@ -478,7 +478,7 @@ def denoise_images():
                 train(model, optimizer, img_bank, quality_weights)
                 scheduler.step()
                 
-                if (epoch + 1) % 200 == 0:
+                if (epoch + 1) % 2000 == 0:
                     with torch.no_grad():
                         current_pred = torch.clamp(model(noisy_img), 0, 1)
                         prev_mse = current_mse
