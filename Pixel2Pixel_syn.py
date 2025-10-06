@@ -504,23 +504,23 @@ def denoise_images():
                     elapsed = time.time() - start_time
                     print(f"Bank rebuilt in {elapsed:.2f} seconds. Shape: {topk.shape}")
 
-        # Final evaluation
-        PSNR, out_img = test(model, noisy_img, clean_img_tensor)
-        out_img_pil = to_pil_image(out_img.squeeze(0))
-        out_img_save_path = os.path.join(args.out_image, os.path.splitext(image_file)[0] + '.png')
-        out_img_pil.save(out_img_save_path)
+            # Final evaluation
+            PSNR, out_img = test(model, noisy_img, clean_img_tensor)
+            out_img_pil = to_pil_image(out_img.squeeze(0))
+            out_img_save_path = os.path.join(args.out_image, os.path.splitext(image_file)[0] + '.png')
+            out_img_pil.save(out_img_save_path)
 
-        noisy_img_pil = to_pil_image(noisy_img.squeeze(0))
-        noisy_img_save_path = os.path.join(args.out_image, os.path.splitext(image_file)[0] + '_noisy.png')
-        noisy_img_pil.save(noisy_img_save_path)
+            noisy_img_pil = to_pil_image(noisy_img.squeeze(0))
+            noisy_img_save_path = os.path.join(args.out_image, os.path.splitext(image_file)[0] + '_noisy.png')
+            noisy_img_pil.save(noisy_img_save_path)
 
-        out_img_loaded = io.imread(out_img_save_path)
-        min_dim = min(clean_img_np.shape[0], clean_img_np.shape[1])
-        win_size = min(7, min_dim if min_dim % 2 == 1 else min_dim - 1)
-        SSIM, _ = compare_ssim(clean_img_np, out_img_loaded, full=True, channel_axis=2, win_size=win_size)
-        print(f"\nFinal Results - Image: {image_file} | PSNR: {PSNR:.2f} dB | SSIM: {SSIM:.4f}")
-        avg_PSNR += PSNR
-        avg_SSIM += SSIM
+            out_img_loaded = io.imread(out_img_save_path)
+            min_dim = min(clean_img_np.shape[0], clean_img_np.shape[1])
+            win_size = min(7, min_dim if min_dim % 2 == 1 else min_dim - 1)
+            SSIM, _ = compare_ssim(clean_img_np, out_img_loaded, full=True, channel_axis=2, win_size=win_size)
+            print(f"\nFinal Results - Image: {image_file} | PSNR: {PSNR:.2f} dB | SSIM: {SSIM:.4f}")
+            avg_PSNR += PSNR
+            avg_SSIM += SSIM
 
     avg_PSNR /= len(image_files)
     avg_SSIM /= len(image_files)
