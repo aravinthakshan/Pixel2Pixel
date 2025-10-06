@@ -242,10 +242,11 @@ def construct_pixel_bank():
 
 # -------------------------------
 class Network(nn.Module):
-    def __init__(self, n_chan, chan_embed=64, num_conv_layers=6):
+    def __init__(self, n_chan, chan_embed=64, num_conv_layers=6, use_sigmoid = True):
         super(Network, self).__init__()
         self.act = nn.LeakyReLU(negative_slope=0.2, inplace=True)
         self.num_conv_layers = num_conv_layers
+        self.use_sigmoid = use_sigmoid
         
         # First conv layer
         self.conv1 = nn.Conv2d(n_chan, chan_embed, 3, padding=1)
@@ -259,6 +260,7 @@ class Network(nn.Module):
         self.conv_final = nn.Conv2d(chan_embed, n_chan, 1)
         
         self._initialize_weights()
+        
 
     def forward(self, x):
         x = self.act(self.conv1(x))
@@ -268,8 +270,9 @@ class Network(nn.Module):
             x = self.act(conv_layer(x))
         
         x = self.conv_final(x)
-        # return torch.sigmoid(x)
-        return x 
+        if self.use_sigmoid:
+            return torch.sigmoid(x)
+        return x
 
     def _initialize_weights(self):
         for m in self.modules():
