@@ -428,7 +428,7 @@ def denoise_images():
             else:
                 model = Network(n_chan, num_conv_layers=6).to(device)  # Default 6 layers
             
-            print(f"Number of parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
+            #print(f"Number of parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
             optimizer = optim.AdamW(model.parameters(), lr=lr)
             
             # Load current pixel bank
@@ -452,7 +452,7 @@ def denoise_images():
                             distances, 
                             alpha=distance_alpha
                         )
-                    print(f"Using distance-based sampling (alpha={distance_alpha:.2f})")
+                    #print(f"Using distance-based sampling (alpha={distance_alpha:.2f})")
                     
                     # Print statistics
                     avg_weight = quality_weights.mean().item()
