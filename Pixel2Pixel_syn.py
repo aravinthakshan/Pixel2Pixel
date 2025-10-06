@@ -16,7 +16,7 @@ import torch.nn.init as init
 
 import torchvision.transforms as transforms
 from torchvision.transforms.functional import to_pil_image
-
+from torch.amp import autocast, GradScaler
 import einops
 import optuna
 from optuna.trial import TrialState
@@ -168,7 +168,7 @@ def add_noise(x, noise_level, noise_type):
 # PIXEL BANK CONSTRUCTION (GPU-OPTIMIZED)
 # ========================================================================
 
-@torch.cuda.amp.autocast(enabled=GPU_CONFIG['use_amp'])
+@autocast(device_type='cuda', enabled=GPU_CONFIG['use_amp'])
 def construct_pixel_bank_from_image(img_tensor, file_name_without_ext, bank_dir, params):
     pad_sz = params['ws'] // 2 + params['ps'] // 2
     center_offset = params['ws'] // 2
@@ -191,7 +191,7 @@ def construct_pixel_bank_from_image(img_tensor, file_name_without_ext, bank_dir,
     distance_list = []
 
     # Process blocks with GPU optimization
-    with torch.cuda.amp.autocast(enabled=GPU_CONFIG['use_amp']):
+    with autocast(device_type='cuda', enabled=GPU_CONFIG['use_amp']):
         for blk_i in range(num_blk_w):
             for blk_j in range(num_blk_h):
                 start_h = blk_j * blk_sz
@@ -383,7 +383,7 @@ def train_step(model, optimizer, img_bank, quality_weights, scaler, params):
     
     loss_f = nn.L1Loss() if params['loss'] == 'L1' else nn.MSELoss()
     
-    with torch.cuda.amp.autocast(enabled=GPU_CONFIG['use_amp']):
+    with autocast(device_type='cuda', enabled=GPU_CONFIG['use_amp']):
         pred = model(img1)
         loss = loss_f(img2, pred)
     
@@ -397,7 +397,7 @@ def train_step(model, optimizer, img_bank, quality_weights, scaler, params):
 
 def test(model, noisy_img, clean_img):
     with torch.no_grad():
-        with torch.cuda.amp.autocast(enabled=GPU_CONFIG['use_amp']):
+        with autocast(device_type='cuda', enabled=GPU_CONFIG['use_amp']):
             pred = torch.clamp(model(noisy_img), 0, 1)
         mse_val = F.mse_loss(clean_img, pred).item()
         psnr = 10 * np.log10(1 / mse_val) if mse_val > 0 else 100.0
@@ -481,8 +481,7 @@ def denoise_images(params, verbose=True):
         else:
             layer_schedule = layer_schedule_config[:params['num_iterations']]
         
-        scaler = torch.cuda.amp.GradScaler(enabled=GPU_CONFIG['use_amp'])
-
+        scaler = GradScaler(device='cuda', enabled=GPU_CONFIG['use_amp'])
         # Iterative training
         for iteration in range(params['num_iterations']):
             current_layers = layer_schedule[iteration]
