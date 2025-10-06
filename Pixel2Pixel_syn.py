@@ -473,6 +473,7 @@ def denoise_images():
                                    gamma=0.5)
 
             # Train for epochs_per_iter
+
             for epoch in range(args.epochs_per_iter):
                 train(model, optimizer, img_bank, quality_weights)
                 scheduler.step()
@@ -480,7 +481,10 @@ def denoise_images():
                 if (epoch + 1) % 200 == 0:
                     with torch.no_grad():
                         current_pred = torch.clamp(model(noisy_img), 0, 1)
+                        prev_mse = current_mse
                         current_mse = mse_loss(clean_img_tensor, current_pred).item()
+                        print(current_mse-prev_mse)
+                            # if current_mse-prev_mse<:
                         current_psnr = 10 * np.log10(1 / current_mse)
                     print(f"  Epoch {epoch+1}/{args.epochs_per_iter} - PSNR: {current_psnr:.2f} dB")
 
