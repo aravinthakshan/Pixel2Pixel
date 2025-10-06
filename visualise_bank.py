@@ -59,11 +59,12 @@ def construct_pixel_bank_from_image(img_tensor, file_name_without_ext, bank_dir)
             sub_img_uf = img_unfold[..., start_h:end_h, start_w:end_w]
             sub_img_uf_inp = sub_img_uf[..., :-1, :-1] if is_window_size_even else sub_img_uf
             patch_windows = F.unfold(sub_img_uf_inp, kernel_size=WINDOW_SIZE, padding=0, stride=1)
+            num_positions = int(patch_windows.shape[-1] ** 0.5)  # sqrt of total patches
             patch_windows = einops.rearrange(
                 patch_windows,
                 'b (c k1 k2 k3 k4) (h w) -> b (c k1 k2) (k3 k4) h w',
                 k1=PATCH_SIZE, k2=PATCH_SIZE, k3=WINDOW_SIZE, k4=WINDOW_SIZE,
-                h=blk_sz, w=blk_sz
+                h=num_positions, w=num_positions
             )
 
             img_center = einops.rearrange(
