@@ -121,98 +121,97 @@ def construct_pixel_bank_from_image(img_tensor, file_name_without_ext, bank_dir)
     img_tensor: [1, C, H, W] tensor on GPU
     Returns: topk tensor and distance tensor for quality scoring
     """
-    if '8' in file_name_without_ext:
-        pad_sz = WINDOW_SIZE // 2 + PATCH_SIZE // 2
-        center_offset = WINDOW_SIZE // 2
-        blk_sz = 64  # Block size for processing
+    pad_sz = WINDOW_SIZE // 2 + PATCH_SIZE // 2
+    center_offset = WINDOW_SIZE // 2
+    blk_sz = 64  # Block size for processing
 
-        img = img_tensor  # Already on GPU
+    img = img_tensor  # Already on GPU
 
-        # Pad image and extract patches
-        img_pad = F.pad(img, (pad_sz, pad_sz, pad_sz, pad_sz), mode='reflect')
-        img_unfold = F.unfold(img_pad, kernel_size=PATCH_SIZE, padding=0, stride=1)
-        H_new = img.shape[-2] + WINDOW_SIZE
-        W_new = img.shape[-1] + WINDOW_SIZE
-        img_unfold = einops.rearrange(img_unfold, 'b c (h w) -> b c h w', h=H_new, w=W_new)
+    # Pad image and extract patches
+    img_pad = F.pad(img, (pad_sz, pad_sz, pad_sz, pad_sz), mode='reflect')
+    img_unfold = F.unfold(img_pad, kernel_size=PATCH_SIZE, padding=0, stride=1)
+    H_new = img.shape[-2] + WINDOW_SIZE
+    W_new = img.shape[-1] + WINDOW_SIZE
+    img_unfold = einops.rearrange(img_unfold, 'b c (h w) -> b c h w', h=H_new, w=W_new)
 
-        num_blk_w = img.shape[-1] // blk_sz
-        num_blk_h = img.shape[-2] // blk_sz
-        is_window_size_even = (WINDOW_SIZE % 2 == 0)
-        topk_list = []
-        distance_list = []
+    num_blk_w = img.shape[-1] // blk_sz
+    num_blk_h = img.shape[-2] // blk_sz
+    is_window_size_even = (WINDOW_SIZE % 2 == 0)
+    topk_list = []
+    distance_list = []
 
-        # Iterate over blocks in the image
-        for blk_i in range(num_blk_w):
-            for blk_j in range(num_blk_h):
-                start_h = blk_j * blk_sz
-                end_h = (blk_j + 1) * blk_sz + WINDOW_SIZE
-                start_w = blk_i * blk_sz
-                end_w = (blk_i + 1) * blk_sz + WINDOW_SIZE
+    # Iterate over blocks in the image
+    for blk_i in range(num_blk_w):
+        for blk_j in range(num_blk_h):
+            start_h = blk_j * blk_sz
+            end_h = (blk_j + 1) * blk_sz + WINDOW_SIZE
+            start_w = blk_i * blk_sz
+            end_w = (blk_i + 1) * blk_sz + WINDOW_SIZE
 
-                sub_img_uf = img_unfold[..., start_h:end_h, start_w:end_w]
-                sub_img_shape = sub_img_uf.shape
+            sub_img_uf = img_unfold[..., start_h:end_h, start_w:end_w]
+            sub_img_shape = sub_img_uf.shape
 
-                if is_window_size_even:
-                    sub_img_uf_inp = sub_img_uf[..., :-1, :-1]
-                else:
-                    sub_img_uf_inp = sub_img_uf
+            if is_window_size_even:
+                sub_img_uf_inp = sub_img_uf[..., :-1, :-1]
+            else:
+                sub_img_uf_inp = sub_img_uf
 
-                patch_windows = F.unfold(sub_img_uf_inp, kernel_size=WINDOW_SIZE, padding=0, stride=1)
-                patch_windows = einops.rearrange(
-                    patch_windows,
-                    'b (c k1 k2 k3 k4) (h w) -> b (c k1 k2) (k3 k4) h w',
-                    k1=PATCH_SIZE, k2=PATCH_SIZE, k3=WINDOW_SIZE, k4=WINDOW_SIZE,
-                    h=blk_sz, w=blk_sz
-                )
+            patch_windows = F.unfold(sub_img_uf_inp, kernel_size=WINDOW_SIZE, padding=0, stride=1)
+            patch_windows = einops.rearrange(
+                patch_windows,
+                'b (c k1 k2 k3 k4) (h w) -> b (c k1 k2) (k3 k4) h w',
+                k1=PATCH_SIZE, k2=PATCH_SIZE, k3=WINDOW_SIZE, k4=WINDOW_SIZE,
+                h=blk_sz, w=blk_sz
+            )
 
-                img_center = einops.rearrange(
-                    sub_img_uf,
-                    'b (c k1 k2) h w -> b (c k1 k2) 1 h w',
-                    k1=PATCH_SIZE, k2=PATCH_SIZE,
-                    h=sub_img_shape[-2], w=sub_img_shape[-1]
-                )
-                img_center = img_center[..., center_offset:center_offset + blk_sz, center_offset:center_offset + blk_sz]
+            img_center = einops.rearrange(
+                sub_img_uf,
+                'b (c k1 k2) h w -> b (c k1 k2) 1 h w',
+                k1=PATCH_SIZE, k2=PATCH_SIZE,
+                h=sub_img_shape[-2], w=sub_img_shape[-1]
+            )
+            img_center = img_center[..., center_offset:center_offset + blk_sz, center_offset:center_offset + blk_sz]
 
-                if args.loss == 'L2':
-                    distance = torch.sum((img_center - patch_windows) ** 2, dim=1)
-                elif args.loss == 'L1':
-                    distance = torch.sum(torch.abs(img_center - patch_windows), dim=1)
-                else:
-                    raise ValueError(f"Unsupported loss type: {loss_type}")
+            if args.loss == 'L2':
+                distance = torch.sum((img_center - patch_windows) ** 2, dim=1)
+            elif args.loss == 'L1':
+                distance = torch.sum(torch.abs(img_center - patch_windows), dim=1)
+            else:
+                raise ValueError(f"Unsupported loss type: {loss_type}")
 
-                topk_distances, sort_indices = torch.topk(
-                    distance,
-                    k=NUM_NEIGHBORS,
-                    largest=False,
-                    sorted=True,
-                    dim=-3
-                )
+            topk_distances, sort_indices = torch.topk(
+                distance,
+                k=NUM_NEIGHBORS,
+                largest=False,
+                sorted=True,
+                dim=-3
+            )
 
-                patch_windows_reshape = einops.rearrange(
-                    patch_windows,
-                    'b (c k1 k2) (k3 k4) h w -> b c (k1 k2) (k3 k4) h w',
-                    k1=PATCH_SIZE, k2=PATCH_SIZE, k3=WINDOW_SIZE, k4=WINDOW_SIZE
-                )
-                patch_center = patch_windows_reshape[:, :, patch_windows_reshape.shape[2] // 2, ...]
-                topk = torch.gather(patch_center, dim=-3,
-                                    index=sort_indices.unsqueeze(1).repeat(1, 3, 1, 1, 1))
-                topk_list.append(topk)
-                distance_list.append(topk_distances)
+            patch_windows_reshape = einops.rearrange(
+                patch_windows,
+                'b (c k1 k2) (k3 k4) h w -> b c (k1 k2) (k3 k4) h w',
+                k1=PATCH_SIZE, k2=PATCH_SIZE, k3=WINDOW_SIZE, k4=WINDOW_SIZE
+            )
+            patch_center = patch_windows_reshape[:, :, patch_windows_reshape.shape[2] // 2, ...]
+            topk = torch.gather(patch_center, dim=-3,
+                                index=sort_indices.unsqueeze(1).repeat(1, 3, 1, 1, 1))
+            topk_list.append(topk)
+            distance_list.append(topk_distances)
 
-        # Merge the results from all blocks to form the pixel bank
-        topk = torch.cat(topk_list, dim=0)
-        topk = einops.rearrange(topk, '(w1 w2) c k h w -> k c (w2 h) (w1 w)', w1=num_blk_w, w2=num_blk_h)
-        topk = topk.permute(2, 3, 0, 1)
-        
-        distances = torch.cat(distance_list, dim=0)
-        distances = einops.rearrange(distances, '(w1 w2) k h w -> k (w2 h) (w1 w)', w1=num_blk_w, w2=num_blk_h)
-        distances = distances.permute(1, 2, 0)
+    # Merge the results from all blocks to form the pixel bank
+    topk = torch.cat(topk_list, dim=0)
+    topk = einops.rearrange(topk, '(w1 w2) c k h w -> k c (w2 h) (w1 w)', w1=num_blk_w, w2=num_blk_h)
+    topk = topk.permute(2, 3, 0, 1)
+    
+    distances = torch.cat(distance_list, dim=0)
+    distances = einops.rearrange(distances, '(w1 w2) k h w -> k (w2 h) (w1 w)', w1=num_blk_w, w2=num_blk_h)
+    distances = distances.permute(1, 2, 0)
 
-        # Save pixel bank and distances
-        np.save(os.path.join(bank_dir, file_name_without_ext), topk.cpu().numpy())
-        np.save(os.path.join(bank_dir, file_name_without_ext + '_distances'), distances.cpu().numpy())
+    # Save pixel bank and distances
+    np.save(os.path.join(bank_dir, file_name_without_ext), topk.cpu().numpy())
+    np.save(os.path.join(bank_dir, file_name_without_ext + '_distances'), distances.cpu().numpy())
 
-        return topk, distances
+    return topk, distances
 
 
 def construct_pixel_bank():
@@ -392,117 +391,118 @@ def denoise_images():
         clean_img_np = io.imread(image_path)
 
         file_name_without_ext = os.path.splitext(image_file)[0]
-        bank_path = os.path.join(bank_dir, file_name_without_ext)
-        if not os.path.exists(bank_path + '.npy'):
-            print(f"Pixel bank for {image_file} not found, skipping denoising.")
-            continue
+        if '8' in file_name_without_ext:
+            bank_path = os.path.join(bank_dir, file_name_without_ext)
+            if not os.path.exists(bank_path + '.npy'):
+                print(f"Pixel bank for {image_file} not found, skipping denoising.")
+                continue
 
-        # Determine mm parameter
-        if noise_type=='gauss' and noise_level==10 or noise_type=='bernoulli':
-            args.mm=2
-        elif noise_type=='gauss' and noise_level==25:
-            args.mm = 4
-        else:
-            args.mm = 8
-
-        n_chan = clean_img_tensor.shape[1]
-        
-        # Iterative bank reconstruction with progressive growing
-        for iteration in range(args.num_iterations):
-            print(f"\n{'='*60}")
-            print(f"Image: {image_file} | Iteration {iteration + 1}/{args.num_iterations}")
-            
-            # Get parameters for this iteration
-            num_layers = nn_layers_list[iteration]
-            mmr_lambda = mmr_lambdas_list[iteration]
-            distance_alpha = distance_alphas_list[iteration]
-            
-            if args.progressive_growing:
-                print(f"Network: {num_layers} conv layers")
-            print(f"Sampling: Distance-based (alpha={distance_alpha:.2f})")
-            print(f"{'='*60}")
-            
-            # Create network with specified number of layers
-            global model
-            if args.progressive_growing:
-                model = Network(n_chan, num_conv_layers=num_layers).to(device)
+            # Determine mm parameter
+            if noise_type=='gauss' and noise_level==10 or noise_type=='bernoulli':
+                args.mm=2
+            elif noise_type=='gauss' and noise_level==25:
+                args.mm = 4
             else:
-                model = Network(n_chan, num_conv_layers=6).to(device)  # Default 6 layers
+                args.mm = 8
+
+            n_chan = clean_img_tensor.shape[1]
             
-            print(f"Number of parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
-            optimizer = optim.AdamW(model.parameters(), lr=lr)
-            
-            # Load current pixel bank
-            img_bank_arr = np.load(bank_path + '.npy')
-            if img_bank_arr.ndim == 3:
-                img_bank_arr = np.expand_dims(img_bank_arr, axis=1)
-            img_bank = img_bank_arr.astype(np.float32).transpose((2, 0, 1, 3))
-            img_bank = img_bank[:args.mm]
-            img_bank = torch.from_numpy(img_bank).to(device)
-
-            # Load distances and compute quality weights with iteration-specific parameters
-            quality_weights = None
-            if args.use_quality_weights:
-                dist_path = os.path.join(bank_dir, file_name_without_ext + '_distances.npy')
-                if os.path.exists(dist_path):
-                    distances_arr = np.load(dist_path)
-                    distances = torch.from_numpy(distances_arr.astype(np.float32)).to(device)
-                    distances = distances[..., :args.mm]
-                    
-                    quality_weights = compute_quality_weights_distance(
-                            distances, 
-                            alpha=distance_alpha
-                        )
-                    print(f"Using distance-based sampling (alpha={distance_alpha:.2f})")
-                    
-                    # Print statistics
-                    avg_weight = quality_weights.mean().item()
-                    max_weight = quality_weights.max().item()
-                    min_weight = quality_weights.min().item()
-                    print(f"  Weight stats - Mean: {avg_weight:.4f}, Max: {max_weight:.4f}, Min: {min_weight:.4f}")
-                else:
-                    print("Distance file not found, using uniform sampling")
-
-            noisy_img = img_bank[0].unsqueeze(0).permute(0, 3, 1, 2)
-
-            # Reset scheduler for each iteration
-            scheduler = MultiStepLR(optimizer, 
-                                   milestones=[int(args.epochs_per_iter*0.5), 
-                                             int(args.epochs_per_iter*0.67), 
-                                             int(args.epochs_per_iter*0.83)], 
-                                   gamma=0.5)
-
-            # Train for epochs_per_iter
-            current_mse = 0
-            for epoch in range(args.epochs_per_iter):
-                train(model, optimizer, img_bank, quality_weights)
-                scheduler.step()
+            # Iterative bank reconstruction with progressive growing
+            for iteration in range(args.num_iterations):
+                print(f"\n{'='*60}")
+                print(f"Image: {image_file} | Iteration {iteration + 1}/{args.num_iterations}")
                 
-                if (epoch + 1) % 200 == 0:
-                    with torch.no_grad():
-                        current_pred = torch.clamp(model(noisy_img), 0, 1)
-                        prev_mse = current_mse
-                        current_mse = mse_loss(clean_img_tensor, current_pred).item()
-                        print(current_mse-prev_mse)
-                            # if current_mse-prev_mse<:
-                        current_psnr = 10 * np.log10(1 / current_mse)
-                    print(f"  Epoch {epoch+1}/{args.epochs_per_iter} - PSNR: {current_psnr:.2f} dB")
+                # Get parameters for this iteration
+                num_layers = nn_layers_list[iteration]
+                mmr_lambda = mmr_lambdas_list[iteration]
+                distance_alpha = distance_alphas_list[iteration]
+                
+                if args.progressive_growing:
+                    print(f"Network: {num_layers} conv layers")
+                print(f"Sampling: Distance-based (alpha={distance_alpha:.2f})")
+                print(f"{'='*60}")
+                
+                # Create network with specified number of layers
+                global model
+                if args.progressive_growing:
+                    model = Network(n_chan, num_conv_layers=num_layers).to(device)
+                else:
+                    model = Network(n_chan, num_conv_layers=6).to(device)  # Default 6 layers
+                
+                print(f"Number of parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
+                optimizer = optim.AdamW(model.parameters(), lr=lr)
+                
+                # Load current pixel bank
+                img_bank_arr = np.load(bank_path + '.npy')
+                if img_bank_arr.ndim == 3:
+                    img_bank_arr = np.expand_dims(img_bank_arr, axis=1)
+                img_bank = img_bank_arr.astype(np.float32).transpose((2, 0, 1, 3))
+                img_bank = img_bank[:args.mm]
+                img_bank = torch.from_numpy(img_bank).to(device)
 
-            # Get partially denoised image
-            with torch.no_grad():
-                denoised_img = torch.clamp(model(noisy_img), 0, 1)
-                current_mse = mse_loss(clean_img_tensor, denoised_img).item()
-                current_psnr = 10 * np.log10(1 / current_mse)
-            
-            print(f"Iteration {iteration + 1} complete - PSNR: {current_psnr:.2f} dB")
-            
-            # Rebuild pixel bank using partially denoised image (except for last iteration)
-            if iteration < args.num_iterations - 1:
-                print(f"Rebuilding pixel bank with partially denoised image...")
-                start_time = time.time()
-                topk, distances = construct_pixel_bank_from_image(denoised_img, file_name_without_ext, bank_dir)
-                elapsed = time.time() - start_time
-                print(f"Bank rebuilt in {elapsed:.2f} seconds. Shape: {topk.shape}")
+                # Load distances and compute quality weights with iteration-specific parameters
+                quality_weights = None
+                if args.use_quality_weights:
+                    dist_path = os.path.join(bank_dir, file_name_without_ext + '_distances.npy')
+                    if os.path.exists(dist_path):
+                        distances_arr = np.load(dist_path)
+                        distances = torch.from_numpy(distances_arr.astype(np.float32)).to(device)
+                        distances = distances[..., :args.mm]
+                        
+                        quality_weights = compute_quality_weights_distance(
+                                distances, 
+                                alpha=distance_alpha
+                            )
+                        print(f"Using distance-based sampling (alpha={distance_alpha:.2f})")
+                        
+                        # Print statistics
+                        avg_weight = quality_weights.mean().item()
+                        max_weight = quality_weights.max().item()
+                        min_weight = quality_weights.min().item()
+                        print(f"  Weight stats - Mean: {avg_weight:.4f}, Max: {max_weight:.4f}, Min: {min_weight:.4f}")
+                    else:
+                        print("Distance file not found, using uniform sampling")
+
+                noisy_img = img_bank[0].unsqueeze(0).permute(0, 3, 1, 2)
+
+                # Reset scheduler for each iteration
+                scheduler = MultiStepLR(optimizer, 
+                                    milestones=[int(args.epochs_per_iter*0.5), 
+                                                int(args.epochs_per_iter*0.67), 
+                                                int(args.epochs_per_iter*0.83)], 
+                                    gamma=0.5)
+
+                # Train for epochs_per_iter
+                current_mse = 0
+                for epoch in range(args.epochs_per_iter):
+                    train(model, optimizer, img_bank, quality_weights)
+                    scheduler.step()
+                    
+                    if (epoch + 1) % 200 == 0:
+                        with torch.no_grad():
+                            current_pred = torch.clamp(model(noisy_img), 0, 1)
+                            prev_mse = current_mse
+                            current_mse = mse_loss(clean_img_tensor, current_pred).item()
+                            print(current_mse-prev_mse)
+                                # if current_mse-prev_mse<:
+                            current_psnr = 10 * np.log10(1 / current_mse)
+                        print(f"  Epoch {epoch+1}/{args.epochs_per_iter} - PSNR: {current_psnr:.2f} dB")
+
+                # Get partially denoised image
+                with torch.no_grad():
+                    denoised_img = torch.clamp(model(noisy_img), 0, 1)
+                    current_mse = mse_loss(clean_img_tensor, denoised_img).item()
+                    current_psnr = 10 * np.log10(1 / current_mse)
+                
+                print(f"Iteration {iteration + 1} complete - PSNR: {current_psnr:.2f} dB")
+                
+                # Rebuild pixel bank using partially denoised image (except for last iteration)
+                if iteration < args.num_iterations - 1:
+                    print(f"Rebuilding pixel bank with partially denoised image...")
+                    start_time = time.time()
+                    topk, distances = construct_pixel_bank_from_image(denoised_img, file_name_without_ext, bank_dir)
+                    elapsed = time.time() - start_time
+                    print(f"Bank rebuilt in {elapsed:.2f} seconds. Shape: {topk.shape}")
 
         # Final evaluation
         PSNR, out_img = test(model, noisy_img, clean_img_tensor)
