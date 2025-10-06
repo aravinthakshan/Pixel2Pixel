@@ -391,144 +391,143 @@ def denoise_images():
         clean_img_np = io.imread(image_path)
 
         file_name_without_ext = os.path.splitext(image_file)[0]
-        if '8' in file_name_without_ext:
-            bank_path = os.path.join(bank_dir, file_name_without_ext)
-            if not os.path.exists(bank_path + '.npy'):
-                print(f"Pixel bank for {image_file} not found, skipping denoising.")
-                continue
+        bank_path = os.path.join(bank_dir, file_name_without_ext)
+        if not os.path.exists(bank_path + '.npy'):
+            print(f"Pixel bank for {image_file} not found, skipping denoising.")
+            continue
 
-            # Determine mm parameter
-            if noise_type=='gauss' and noise_level==10 or noise_type=='bernoulli':
-                args.mm=2
-            elif noise_type=='gauss' and noise_level==25:
-                args.mm = 4
-            else:
-                args.mm = 8
+        # Determine mm parameter
+        if noise_type=='gauss' and noise_level==10 or noise_type=='bernoulli':
+            args.mm=2
+        elif noise_type=='gauss' and noise_level==25:
+            args.mm = 4
+        else:
+            args.mm = 8
 
-            n_chan = clean_img_tensor.shape[1]
+        n_chan = clean_img_tensor.shape[1]
+        
+        # Iterative bank reconstruction with progressive growing
+        for iteration in range(args.num_iterations):
+            print(f"\n{'='*60}")
+            print(f"Image: {image_file} | Iteration {iteration + 1}/{args.num_iterations}")
             
-            # Iterative bank reconstruction with progressive growing
-            for iteration in range(args.num_iterations):
-                print(f"\n{'='*60}")
-                print(f"Image: {image_file} | Iteration {iteration + 1}/{args.num_iterations}")
-                
-                # Get parameters for this iteration
-                num_layers = nn_layers_list[iteration]
-                mmr_lambda = mmr_lambdas_list[iteration]
-                distance_alpha = distance_alphas_list[iteration]
-                
-                if args.progressive_growing:
-                    print(f"Network: {num_layers} conv layers")
-                print(f"Sampling: Distance-based (alpha={distance_alpha:.2f})")
-                print(f"{'='*60}")
-                
-                # Create network with specified number of layers
-                global model
-                if args.progressive_growing:
-                    model = Network(n_chan, num_conv_layers=num_layers).to(device)
+            # Get parameters for this iteration
+            num_layers = nn_layers_list[iteration]
+            mmr_lambda = mmr_lambdas_list[iteration]
+            distance_alpha = distance_alphas_list[iteration]
+            
+            if args.progressive_growing:
+                print(f"Network: {num_layers} conv layers")
+            print(f"Sampling: Distance-based (alpha={distance_alpha:.2f})")
+            print(f"{'='*60}")
+            
+            # Create network with specified number of layers
+            global model
+            if args.progressive_growing:
+                model = Network(n_chan, num_conv_layers=num_layers).to(device)
+            else:
+                model = Network(n_chan, num_conv_layers=6).to(device)  # Default 6 layers
+            
+            print(f"Number of parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
+            optimizer = optim.AdamW(model.parameters(), lr=lr)
+            
+            # Load current pixel bank
+            img_bank_arr = np.load(bank_path + '.npy')
+            if img_bank_arr.ndim == 3:
+                img_bank_arr = np.expand_dims(img_bank_arr, axis=1)
+            img_bank = img_bank_arr.astype(np.float32).transpose((2, 0, 1, 3))
+            img_bank = img_bank[:args.mm]
+            img_bank = torch.from_numpy(img_bank).to(device)
+
+            # Load distances and compute quality weights with iteration-specific parameters
+            quality_weights = None
+            if args.use_quality_weights:
+                dist_path = os.path.join(bank_dir, file_name_without_ext + '_distances.npy')
+                if os.path.exists(dist_path):
+                    distances_arr = np.load(dist_path)
+                    distances = torch.from_numpy(distances_arr.astype(np.float32)).to(device)
+                    distances = distances[..., :args.mm]
+                    
+                    quality_weights = compute_quality_weights_distance(
+                            distances, 
+                            alpha=distance_alpha
+                        )
+                    print(f"Using distance-based sampling (alpha={distance_alpha:.2f})")
+                    
+                    # Print statistics
+                    avg_weight = quality_weights.mean().item()
+                    max_weight = quality_weights.max().item()
+                    min_weight = quality_weights.min().item()
+                    print(f"  Weight stats - Mean: {avg_weight:.4f}, Max: {max_weight:.4f}, Min: {min_weight:.4f}")
                 else:
-                    model = Network(n_chan, num_conv_layers=6).to(device)  # Default 6 layers
+                    print("Distance file not found, using uniform sampling")
+
+            noisy_img = img_bank[0].unsqueeze(0).permute(0, 3, 1, 2)
+
+            # Reset scheduler for each iteration
+            scheduler = MultiStepLR(optimizer, 
+                                milestones=[int(args.epochs_per_iter*0.5), 
+                                            int(args.epochs_per_iter*0.67), 
+                                            int(args.epochs_per_iter*0.83)], 
+                                gamma=0.5)
+
+            # Train for epochs_per_iter
+            current_mse = 0
+            epoch = 0
+            while(epoch <(args.epochs_per_iter)):
+                train(model, optimizer, img_bank, quality_weights)
+                scheduler.step()
                 
-                print(f"Number of parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
-                optimizer = optim.AdamW(model.parameters(), lr=lr)
+                if (epoch + 1) % 200 == 0:
+                    with torch.no_grad():
+                        current_pred = torch.clamp(model(noisy_img), 0, 1)
+                        prev_mse = current_mse
+                        current_mse = mse_loss(clean_img_tensor, current_pred).item()
+
+                        #Sigmoid can cause the weights to move to 0, Removing final sigmoid layer if that happens
+                        if (current_mse-prev_mse==0.0):
+                            print("Restarting trianing with sigmoid turned off")
+                            model.use_sigmoid = False
+                            epoch=0
+                        current_psnr = 10 * np.log10(1 / current_mse)
+                    print(f"  Epoch {epoch+1}/{args.epochs_per_iter} - PSNR: {current_psnr:.2f} dB")
                 
-                # Load current pixel bank
-                img_bank_arr = np.load(bank_path + '.npy')
-                if img_bank_arr.ndim == 3:
-                    img_bank_arr = np.expand_dims(img_bank_arr, axis=1)
-                img_bank = img_bank_arr.astype(np.float32).transpose((2, 0, 1, 3))
-                img_bank = img_bank[:args.mm]
-                img_bank = torch.from_numpy(img_bank).to(device)
+                epoch+=1
 
-                # Load distances and compute quality weights with iteration-specific parameters
-                quality_weights = None
-                if args.use_quality_weights:
-                    dist_path = os.path.join(bank_dir, file_name_without_ext + '_distances.npy')
-                    if os.path.exists(dist_path):
-                        distances_arr = np.load(dist_path)
-                        distances = torch.from_numpy(distances_arr.astype(np.float32)).to(device)
-                        distances = distances[..., :args.mm]
-                        
-                        quality_weights = compute_quality_weights_distance(
-                                distances, 
-                                alpha=distance_alpha
-                            )
-                        print(f"Using distance-based sampling (alpha={distance_alpha:.2f})")
-                        
-                        # Print statistics
-                        avg_weight = quality_weights.mean().item()
-                        max_weight = quality_weights.max().item()
-                        min_weight = quality_weights.min().item()
-                        print(f"  Weight stats - Mean: {avg_weight:.4f}, Max: {max_weight:.4f}, Min: {min_weight:.4f}")
-                    else:
-                        print("Distance file not found, using uniform sampling")
+            # Get partially denoised image
+            with torch.no_grad():
+                denoised_img = torch.clamp(model(noisy_img), 0, 1)
+                current_mse = mse_loss(clean_img_tensor, denoised_img).item()
+                current_psnr = 10 * np.log10(1 / current_mse)
+            
+            print(f"Iteration {iteration + 1} complete - PSNR: {current_psnr:.2f} dB")
+            
+            # Rebuild pixel bank using partially denoised image (except for last iteration)
+            if iteration < args.num_iterations - 1:
+                print(f"Rebuilding pixel bank with partially denoised image...")
+                start_time = time.time()
+                topk, distances = construct_pixel_bank_from_image(denoised_img, file_name_without_ext, bank_dir)
+                elapsed = time.time() - start_time
+                print(f"Bank rebuilt in {elapsed:.2f} seconds. Shape: {topk.shape}")
+            
+        # Final evaluation
+        PSNR, out_img = test(model, noisy_img, clean_img_tensor)
+        out_img_pil = to_pil_image(out_img.squeeze(0))
+        out_img_save_path = os.path.join(args.out_image, os.path.splitext(image_file)[0] + '.png')
+        out_img_pil.save(out_img_save_path)
 
-                noisy_img = img_bank[0].unsqueeze(0).permute(0, 3, 1, 2)
+        noisy_img_pil = to_pil_image(noisy_img.squeeze(0))
+        noisy_img_save_path = os.path.join(args.out_image, os.path.splitext(image_file)[0] + '_noisy.png')
+        noisy_img_pil.save(noisy_img_save_path)
 
-                # Reset scheduler for each iteration
-                scheduler = MultiStepLR(optimizer, 
-                                    milestones=[int(args.epochs_per_iter*0.5), 
-                                                int(args.epochs_per_iter*0.67), 
-                                                int(args.epochs_per_iter*0.83)], 
-                                    gamma=0.5)
-
-                # Train for epochs_per_iter
-                current_mse = 0
-                epoch = 0
-                while(epoch <(args.epochs_per_iter)):
-                    train(model, optimizer, img_bank, quality_weights)
-                    scheduler.step()
-                    
-                    if (epoch + 1) % 200 == 0:
-                        with torch.no_grad():
-                            current_pred = torch.clamp(model(noisy_img), 0, 1)
-                            prev_mse = current_mse
-                            current_mse = mse_loss(clean_img_tensor, current_pred).item()
-
-                            #Sigmoid can cause the weights to move to 0, Removing final sigmoid layer if that happens
-                            if (current_mse-prev_mse==0.0):
-                                print("Restarting trianing with sigmoid turned off")
-                                model.use_sigmoid = False
-                                epoch=0
-                            current_psnr = 10 * np.log10(1 / current_mse)
-                        print(f"  Epoch {epoch+1}/{args.epochs_per_iter} - PSNR: {current_psnr:.2f} dB")
-                    
-                    epoch+=1
-
-                # Get partially denoised image
-                with torch.no_grad():
-                    denoised_img = torch.clamp(model(noisy_img), 0, 1)
-                    current_mse = mse_loss(clean_img_tensor, denoised_img).item()
-                    current_psnr = 10 * np.log10(1 / current_mse)
-                
-                print(f"Iteration {iteration + 1} complete - PSNR: {current_psnr:.2f} dB")
-                
-                # Rebuild pixel bank using partially denoised image (except for last iteration)
-                if iteration < args.num_iterations - 1:
-                    print(f"Rebuilding pixel bank with partially denoised image...")
-                    start_time = time.time()
-                    topk, distances = construct_pixel_bank_from_image(denoised_img, file_name_without_ext, bank_dir)
-                    elapsed = time.time() - start_time
-                    print(f"Bank rebuilt in {elapsed:.2f} seconds. Shape: {topk.shape}")
-                
-            # Final evaluation
-            PSNR, out_img = test(model, noisy_img, clean_img_tensor)
-            out_img_pil = to_pil_image(out_img.squeeze(0))
-            out_img_save_path = os.path.join(args.out_image, os.path.splitext(image_file)[0] + '.png')
-            out_img_pil.save(out_img_save_path)
-
-            noisy_img_pil = to_pil_image(noisy_img.squeeze(0))
-            noisy_img_save_path = os.path.join(args.out_image, os.path.splitext(image_file)[0] + '_noisy.png')
-            noisy_img_pil.save(noisy_img_save_path)
-
-            out_img_loaded = io.imread(out_img_save_path)
-            min_dim = min(clean_img_np.shape[0], clean_img_np.shape[1])
-            win_size = min(7, min_dim if min_dim % 2 == 1 else min_dim - 1)
-            SSIM, _ = compare_ssim(clean_img_np, out_img_loaded, full=True, channel_axis=2, win_size=win_size)
-            print(f"\nFinal Results - Image: {image_file} | PSNR: {PSNR:.2f} dB | SSIM: {SSIM:.4f}")
-            avg_PSNR += PSNR
-            avg_SSIM += SSIM
-            model.use_sigmoid = True
+        out_img_loaded = io.imread(out_img_save_path)
+        min_dim = min(clean_img_np.shape[0], clean_img_np.shape[1])
+        win_size = min(7, min_dim if min_dim % 2 == 1 else min_dim - 1)
+        SSIM, _ = compare_ssim(clean_img_np, out_img_loaded, full=True, channel_axis=2, win_size=win_size)
+        print(f"\nFinal Results - Image: {image_file} | PSNR: {PSNR:.2f} dB | SSIM: {SSIM:.4f}")
+        avg_PSNR += PSNR
+        avg_SSIM += SSIM
+        model.use_sigmoid = True
 
     avg_PSNR /= len(image_files)
     avg_SSIM /= len(image_files)
