@@ -296,7 +296,7 @@ def loss_func(img1, img2, loss_f=nn.MSELoss()):
     
 #     return weights
 
-def compute_quality_weights(distances, patch_features=None, lambda_param=0.5, alpha=2.0):
+def compute_quality_weights(distances, patch_features=None, lambda_param=0.2, alpha=2.0):
     """
     Compute MMR-based quality weights for pixel bank samples.
     
