@@ -430,10 +430,7 @@ def denoise_images():
             
             if args.progressive_growing:
                 print(f"Network: {num_layers} conv layers")
-            if args.use == "MMR":
-                print(f"Sampling: MMR (lambda={mmr_lambda:.2f})")
-            else:
-                print(f"Sampling: Distance-based (alpha={distance_alpha:.2f})")
+            print(f"Sampling: Distance-based (alpha={distance_alpha:.2f})")
             print(f"{'='*60}")
             
             # Create network with specified number of layers
