@@ -37,6 +37,16 @@ parser.add_argument('--epochs_per_iter', default=1000, type=int, help='Epochs pe
 parser.add_argument('--use_quality_weights', default=True, type=bool, help='Use quality-based sampling weights')
 parser.add_argument('--alpha', default=2.0, type=float, help='Sharpness of quality scoring (higher = more selective)')
 parser.add_argument('--progressive_growing', default=False, type=bool, help='Use progressive network growing')
+parser.add_argument('--use', default=False, type=str, help='Sampling Strategy: MMR or distance')
+
+# Progressive growing parameters
+parser.add_argument('--nn_layers', default='6,9,12', type=str, 
+                   help='Comma-separated number of conv layers per iteration (e.g., "6,9,12")')
+parser.add_argument('--mmr_lambdas', default='0.8,0.5,0.2', type=str,
+                   help='Comma-separated lambda values for MMR per iteration (e.g., "0.8,0.5,0.2")')
+parser.add_argument('--distance_alphas', default='2.0,2.5,3.0', type=str,
+                   help='Comma-separated alpha values for distance-based sampling per iteration (e.g., "2.0,2.5,3.0")')
+
 args = parser.parse_args()
 
 
@@ -57,6 +67,27 @@ noise_type = args.nt
 loss_type = args.loss
 
 transform = transforms.Compose([transforms.ToTensor()])
+
+
+# Parse progressive parameters
+def parse_iteration_params():
+    """Parse comma-separated parameters for each iteration"""
+    nn_layers = [int(x) for x in args.nn_layers.split(',')]
+    mmr_lambdas = [float(x) for x in args.mmr_lambdas.split(',')]
+    distance_alphas = [float(x) for x in args.distance_alphas.split(',')]
+    
+    # Ensure we have enough parameters for all iterations
+    num_iters = args.num_iterations
+    
+    # If fewer parameters provided, repeat the last one
+    if len(nn_layers) < num_iters:
+        nn_layers.extend([nn_layers[-1]] * (num_iters - len(nn_layers)))
+    if len(mmr_lambdas) < num_iters:
+        mmr_lambdas.extend([mmr_lambdas[-1]] * (num_iters - len(mmr_lambdas)))
+    if len(distance_alphas) < num_iters:
+        distance_alphas.extend([distance_alphas[-1]] * (num_iters - len(distance_alphas)))
+    
+    return nn_layers[:num_iters], mmr_lambdas[:num_iters], distance_alphas[:num_iters]
 
 
 # -------------------------------
@@ -87,7 +118,6 @@ def add_noise(x, noise_level):
     return noisy
 
 
-# This is the only change Working Condition
 # -------------------------------
 def construct_pixel_bank_from_image(img_tensor, file_name_without_ext, bank_dir):
     """
@@ -216,26 +246,33 @@ def construct_pixel_bank():
 
 # -------------------------------
 class Network(nn.Module):
-    def __init__(self, n_chan, chan_embed=64):
+    def __init__(self, n_chan, chan_embed=64, num_conv_layers=6):
         super(Network, self).__init__()
         self.act = nn.LeakyReLU(negative_slope=0.2, inplace=True)
+        self.num_conv_layers = num_conv_layers
+        
+        # First conv layer
         self.conv1 = nn.Conv2d(n_chan, chan_embed, 3, padding=1)
-        self.conv2 = nn.Conv2d(chan_embed, chan_embed, 3, padding=1)
-        self.conv4 = nn.Conv2d(chan_embed, chan_embed, 3, padding=1)
-        self.conv5 = nn.Conv2d(chan_embed, chan_embed, 3, padding=1)
-        self.conv6 = nn.Conv2d(chan_embed, chan_embed, 3, padding=1)
-        self.conv3 = nn.Conv2d(chan_embed, n_chan, 1)
+        
+        # Middle conv layers (dynamically created)
+        self.conv_layers = nn.ModuleList()
+        for i in range(num_conv_layers - 2):  # -2 because we have conv1 and final conv
+            self.conv_layers.append(nn.Conv2d(chan_embed, chan_embed, 3, padding=1))
+        
+        # Final conv layer (1x1)
+        self.conv_final = nn.Conv2d(chan_embed, n_chan, 1)
+        
         self._initialize_weights()
 
     def forward(self, x):
         x = self.act(self.conv1(x))
-        x = self.act(self.conv2(x))
-        x = self.act(self.conv4(x))
-        x = self.act(self.conv5(x))
-        x = self.act(self.conv6(x))
-        x = self.conv3(x)
+        
+        # Pass through all middle layers
+        for conv_layer in self.conv_layers:
+            x = self.act(conv_layer(x))
+        
+        x = self.conv_final(x)
         return torch.sigmoid(x)
-
 
     def _initialize_weights(self):
         for m in self.modules():
@@ -261,52 +298,46 @@ def loss_func(img1, img2, loss_f=nn.MSELoss()):
     return loss
 
 
+# -------------------------------
+def compute_quality_weights_distance(distances, alpha=2.0):
+    """
+    Compute quality weights for pixel bank samples based on distances.
+    
+    Args:
+        distances: [H, W, K] tensor of distances for each pixel's K neighbors
+        alpha: Sharpness parameter (higher = more selective)
+    
+    Returns:
+        weights: [H, W, K] tensor of sampling weights
+    """
+    # Normalize distances per pixel to [0, 1]
+    dist_min = distances.min(dim=-1, keepdim=True)[0]
+    dist_max = distances.max(dim=-1, keepdim=True)[0]
+    dist_range = dist_max - dist_min
+    dist_range = torch.clamp(dist_range, min=1e-8)
+    normalized_dist = (distances - dist_min) / dist_range
+    
+    # Quality score: Gaussian-like curve peaked at medium distances
+    optimal_distance = 0.5
+    quality_scores = torch.exp(-alpha * (normalized_dist - optimal_distance) ** 2)
+    
+    # Penalize very similar patches
+    too_similar_penalty = torch.exp(-10 * normalized_dist)
+    quality_scores = quality_scores * (1 - 0.5 * too_similar_penalty)
+    
+    # Normalize to get sampling probabilities
+    weights = quality_scores / (quality_scores.sum(dim=-1, keepdim=True) + 1e-8)
+    
+    return weights
 
-# # -------------------------------
-# def compute_quality_weights(distances, alpha=2.0):
-#     """
-#     Compute quality weights for pixel bank samples based on distances.
-    
-#     Args:
-#         distances: [H, W, K] tensor of distances for each pixel's K neighbors
-#         alpha: Sharpness parameter (higher = more selective)
-    
-#     Returns:
-#         weights: [H, W, K] tensor of sampling weights
-#     """
-#     # Normalize distances per pixel to [0, 1]
-#     # Shape: [H, W, K]
-#     dist_min = distances.min(dim=-1, keepdim=True)[0]
-#     dist_max = distances.max(dim=-1, keepdim=True)[0]
-#     dist_range = dist_max - dist_min
-#     dist_range = torch.clamp(dist_range, min=1e-8)  # Avoid division by zero
-#     normalized_dist = (distances - dist_min) / dist_range
-    
-#     # Quality score: Gaussian-like curve peaked at medium distances
-#     # We want to favor patches with normalized distance around 0.3-0.7
-#     optimal_distance = 0.5
-#     quality_scores = torch.exp(-alpha * (normalized_dist - optimal_distance) ** 2)
-    
-#     # Penalize very similar patches (distance ≈ 0) more heavily
-#     too_similar_penalty = torch.exp(-10 * normalized_dist)
-#     quality_scores = quality_scores * (1 - 0.5 * too_similar_penalty)
-    
-#     # Normalize to get sampling probabilities
-#     weights = quality_scores / (quality_scores.sum(dim=-1, keepdim=True) + 1e-8)
-    
-#     return weights
 
 def compute_quality_weights(distances, patch_features=None, lambda_param=0.2, alpha=2.0):
     """
     Compute MMR-based quality weights for pixel bank samples.
     
-    MMR balances relevance (low distance to center pixel) with diversity 
-    (dissimilarity among selected patches).
-    
     Args:
         distances: [H, W, K] tensor of distances for each pixel's K neighbors
-        patch_features: [H, W, K, D] optional tensor of patch features for diversity computation
-                       If None, uses distances to approximate diversity
+        patch_features: [H, W, K, D] optional tensor of patch features
         lambda_param: Trade-off between relevance and diversity (0=diversity only, 1=relevance only)
         alpha: Sharpness parameter for converting scores to weights
     
@@ -323,72 +354,53 @@ def compute_quality_weights(distances, patch_features=None, lambda_param=0.2, al
     normalized_dist = (distances - dist_min) / dist_range
     
     # Relevance score: Lower distance = higher relevance
-    relevance = 1.0 - normalized_dist  # [H, W, K]
+    relevance = 1.0 - normalized_dist
     
     # Compute diversity scores
     if patch_features is not None:
-        # Use actual patch features for diversity computation
-        # Compute pairwise similarities between patches at each pixel
-        # patch_features: [H, W, K, D]
-        feat_norm = F.normalize(patch_features, p=2, dim=-1)  # L2 normalize
-        # Compute similarity matrix: [H, W, K, K]
+        feat_norm = F.normalize(patch_features, p=2, dim=-1)
         similarity_matrix = torch.einsum('hwid,hwjd->hwij', feat_norm, feat_norm)
-        # Diversity = average dissimilarity to other patches
-        diversity = 1.0 - similarity_matrix.mean(dim=-1)  # [H, W, K]
+        diversity = 1.0 - similarity_matrix.mean(dim=-1)
     else:
         # Approximate diversity using distance distribution
-        # Patches with unique distances are more diverse
-        # Compute variance of distances as a proxy for diversity
         dist_mean = distances.mean(dim=-1, keepdim=True)
         dist_variance = ((distances - dist_mean) ** 2).mean(dim=-1, keepdim=True)
         dist_std = torch.sqrt(dist_variance + 1e-8)
-        
-        # Diversity score: patches with distances far from mean are more diverse
         diversity = torch.abs(distances - dist_mean) / (dist_std + 1e-8)
-        diversity = torch.tanh(diversity)  # Normalize to [0, 1]
+        diversity = torch.tanh(diversity)
     
-    # MMR score: Linear combination of relevance and diversity
+    # MMR score
     mmr_scores = lambda_param * relevance + (1 - lambda_param) * diversity
     
-    # Apply sharpening to create more selective weights
-    # Use softmax with temperature for smooth probability distribution
+    # Apply sharpening
     temperature = 1.0 / alpha
     mmr_scores_scaled = mmr_scores / temperature
-    
-    # Convert to probabilities using softmax along K dimension
     weights = F.softmax(mmr_scores_scaled, dim=-1)
     
-    # Optional: Apply additional shaping to avoid very uniform distributions
     # Boost high-scoring samples
     weights = weights ** (1.0 + alpha * 0.1)
     weights = weights / (weights.sum(dim=-1, keepdim=True) + 1e-8)
     
     return weights
 
+
 def train(model, optimizer, img_bank, quality_weights=None):
     N, H, W, C = img_bank.shape
     
     if args.use_quality_weights and quality_weights is not None:
         # Sample based on quality weights
-        # quality_weights shape: [H, W, N]
-        # Flatten for easier sampling
-        flat_weights = quality_weights.view(-1, N)  # [H*W, N]
+        flat_weights = quality_weights.view(-1, N)
         
-        # Sample indices for each pixel based on quality weights
         index1 = torch.multinomial(flat_weights, num_samples=1, replacement=True).view(H, W)
-        
-        # Sample second index differently (also based on weights)
         index2 = torch.multinomial(flat_weights, num_samples=1, replacement=True).view(H, W)
         
         # Ensure different indices
         eq_mask = (index2 == index1)
         if eq_mask.any():
-            # Resample for equal indices
             eq_positions = eq_mask.view(-1)
             eq_weights = flat_weights[eq_positions]
             new_samples = torch.multinomial(eq_weights, num_samples=1, replacement=True)
             index2.view(-1)[eq_positions] = new_samples.squeeze()
-            # If still equal after one resample, just add 1 mod N
             eq_mask = (index2 == index1)
             if eq_mask.any():
                 index2[eq_mask] = (index2[eq_mask] + 1) % N
@@ -404,29 +416,6 @@ def train(model, optimizer, img_bank, quality_weights=None):
     img1 = torch.gather(img_bank, 0, index1_exp)
     img1 = img1.permute(0, 3, 1, 2)
 
-    index2_exp = index2.unsqueeze(0).unsqueeze(-1).expand(1, H, W, C)
-    img2 = torch.gather(img_bank, 0, index2_exp)
-    img2 = img2.permute(0, 3, 1, 2)
-
-    loss = loss_func(img1, img2, loss_f)
-    optimizer.zero_grad()
-    loss.backward()
-    optimizer.step()
-    return loss.item()
-
-
-def train_original(model, optimizer, img_bank):
-    """Original training function without quality weights"""
-    N, H, W, C = img_bank.shape
-    index1 = torch.randint(0, N, size=(H, W), device=device)
-    index1_exp = index1.unsqueeze(0).unsqueeze(-1).expand(1, H, W, C)
-    img1 = torch.gather(img_bank, 0, index1_exp)  # Result shape: (1, H, W, C)
-    img1 = img1.permute(0, 3, 1, 2)
-
-    index2 = torch.randint(0, N, size=(H, W), device=device)
-    eq_mask = (index2 == index1)
-    if eq_mask.any():
-        index2[eq_mask] = (index2[eq_mask] + 1) % N
     index2_exp = index2.unsqueeze(0).unsqueeze(-1).expand(1, H, W, C)
     img2 = torch.gather(img_bank, 0, index2_exp)
     img2 = img2.permute(0, 3, 1, 2)
@@ -455,6 +444,9 @@ def denoise_images():
 
     os.makedirs(args.out_image, exist_ok=True)
 
+    # Parse progressive parameters
+    nn_layers_list, mmr_lambdas_list, distance_alphas_list = parse_iteration_params()
+
     lr = 0.001
     avg_PSNR = 0
     avg_SSIM = 0
@@ -480,17 +472,34 @@ def denoise_images():
             args.mm = 8
 
         n_chan = clean_img_tensor.shape[1]
-        global model
-        model = Network(n_chan).to(device)
-        print(f"Number of parameters for {image_file}: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
-
-        optimizer = optim.AdamW(model.parameters(), lr=lr)
         
-        # Iterative bank reconstruction
+        # Iterative bank reconstruction with progressive growing
         for iteration in range(args.num_iterations):
             print(f"\n{'='*60}")
             print(f"Image: {image_file} | Iteration {iteration + 1}/{args.num_iterations}")
+            
+            # Get parameters for this iteration
+            num_layers = nn_layers_list[iteration]
+            mmr_lambda = mmr_lambdas_list[iteration]
+            distance_alpha = distance_alphas_list[iteration]
+            
+            if args.progressive_growing:
+                print(f"Network: {num_layers} conv layers")
+            if args.use == "MMR":
+                print(f"Sampling: MMR (lambda={mmr_lambda:.2f})")
+            else:
+                print(f"Sampling: Distance-based (alpha={distance_alpha:.2f})")
             print(f"{'='*60}")
+            
+            # Create network with specified number of layers
+            global model
+            if args.progressive_growing:
+                model = Network(n_chan, num_conv_layers=num_layers).to(device)
+            else:
+                model = Network(n_chan, num_conv_layers=6).to(device)  # Default 6 layers
+            
+            print(f"Number of parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
+            optimizer = optim.AdamW(model.parameters(), lr=lr)
             
             # Load current pixel bank
             img_bank_arr = np.load(bank_path + '.npy')
@@ -500,18 +509,31 @@ def denoise_images():
             img_bank = img_bank[:args.mm]
             img_bank = torch.from_numpy(img_bank).to(device)
 
-            # Load distances and compute quality weights
+            # Load distances and compute quality weights with iteration-specific parameters
             quality_weights = None
             if args.use_quality_weights:
                 dist_path = os.path.join(bank_dir, file_name_without_ext + '_distances.npy')
                 if os.path.exists(dist_path):
                     distances_arr = np.load(dist_path)
                     distances = torch.from_numpy(distances_arr.astype(np.float32)).to(device)
-                    # Only use distances for the selected mm samples
                     distances = distances[..., :args.mm]
-                    quality_weights = compute_quality_weights(distances, alpha=args.alpha) # distances, patch_features=None, lambda_param=0.5, alpha=2.0 func signature
-                    print(f"Using quality-weighted sampling (alpha={args.alpha})")
-                    # Print some statistics
+                    
+                    if args.use == "MMR":
+                        quality_weights = compute_quality_weights(
+                            distances, 
+                            patch_features=None, 
+                            lambda_param=mmr_lambda,
+                            alpha=2.0
+                        )
+                        print(f"Using MMR sampling (lambda={mmr_lambda:.2f})")
+                    else:
+                        quality_weights = compute_quality_weights_distance(
+                            distances, 
+                            alpha=distance_alpha
+                        )
+                        print(f"Using distance-based sampling (alpha={distance_alpha:.2f})")
+                    
+                    # Print statistics
                     avg_weight = quality_weights.mean().item()
                     max_weight = quality_weights.max().item()
                     min_weight = quality_weights.min().item()
@@ -567,7 +589,6 @@ def denoise_images():
         noisy_img_pil.save(noisy_img_save_path)
 
         out_img_loaded = io.imread(out_img_save_path)
-        # Determine appropriate win_size based on image dimensions
         min_dim = min(clean_img_np.shape[0], clean_img_np.shape[1])
         win_size = min(7, min_dim if min_dim % 2 == 1 else min_dim - 1)
         SSIM, _ = compare_ssim(clean_img_np, out_img_loaded, full=True, channel_axis=2, win_size=win_size)
@@ -584,7 +605,7 @@ def denoise_images():
 # -------------------------------
 if __name__ == "__main__":
     print("="*60)
-    print("Pixel2Pixel with Iterative Refinement & Quality Weighting")
+    print("Pixel2Pixel with Progressive Growing & Iteration-Specific Parameters")
     print("="*60)
     print(f"Configuration:")
     print(f"  Dataset: {args.dataset}")
@@ -592,9 +613,29 @@ if __name__ == "__main__":
     print(f"  Window size: {args.ws}, Patch size: {args.ps}")
     print(f"  Neighbors: {args.nn}, Loss: {args.loss}")
     print(f"  Iterations: {args.num_iterations}, Epochs/iter: {args.epochs_per_iter}")
-    print(f"  Quality weighting: {args.use_quality_weights}, Alpha: {args.alpha}")
+    
+    if args.progressive_growing:
+        nn_layers_list, _, _ = parse_iteration_params()
+        print(f"  Progressive Growing: ENABLED")
+        print(f"  Network layers per iteration: {nn_layers_list}")
+    else:
+        print(f"  Progressive Growing: DISABLED (6 layers for all iterations)")
+    
+    if args.use_quality_weights:
+        print(f"  Quality weighting: ENABLED")
+        if args.use == "MMR":
+            _, mmr_lambdas_list, _ = parse_iteration_params()
+            print(f"  Sampling strategy: MMR")
+            print(f"  MMR lambda per iteration: {mmr_lambdas_list}")
+        else:
+            _, _, distance_alphas_list = parse_iteration_params()
+            print(f"  Sampling strategy: Distance-based")
+            print(f"  Distance alpha per iteration: {distance_alphas_list}")
+    else:
+        print(f"  Quality weighting: DISABLED (uniform sampling)")
+    
     print("="*60)
     print("\nConstructing initial pixel banks from noisy images...")
     construct_pixel_bank()
-    print("\nStarting iterative denoising with bank reconstruction...")
+    print("\nStarting iterative denoising with progressive growing...")
     denoise_images()
