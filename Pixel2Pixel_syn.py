@@ -40,6 +40,7 @@ parser.add_argument('--progressive_growing', default=True, type=bool, help='Use 
 parser.add_argument('--curriculum_learning', default=True, type=bool, help='Use curriculum learning for sample selection')
 parser.add_argument('--curriculum_start', default=1.0, type=float, help='Starting curriculum threshold (1.0 = all samples)')
 parser.add_argument('--curriculum_end', default=0.25, type=float, help='Ending curriculum threshold (0.25 = top 25%)')
+parser.add_argument('--layer_schedule', default='3,5,6', type=str, help='Network layers per iteration (e.g., "6,9,12" or "3,5,6")')
 args = parser.parse_args()
 
 
@@ -219,58 +220,57 @@ def construct_pixel_bank():
 
 # -------------------------------
 class Network(nn.Module):
-    def __init__(self, n_chan, chan_embed=64, num_layers=6):
+    def __init__(self, n_chan, chan_embed=64, max_layers=12):
         super(Network, self).__init__()
-        self.num_layers = num_layers
+        self.max_layers = max_layers
         self.act = nn.LeakyReLU(negative_slope=0.2, inplace=True)
         
-        # Always create all layers, but we'll control which ones are active
+        # Input layer
         self.conv1 = nn.Conv2d(n_chan, chan_embed, 3, padding=1)
-        self.conv2 = nn.Conv2d(chan_embed, chan_embed, 3, padding=1)
-        self.conv4 = nn.Conv2d(chan_embed, chan_embed, 3, padding=1)
-        self.conv5 = nn.Conv2d(chan_embed, chan_embed, 3, padding=1)
-        self.conv6 = nn.Conv2d(chan_embed, chan_embed, 3, padding=1)
-        self.conv3 = nn.Conv2d(chan_embed, n_chan, 1)
+        
+        # Create variable number of middle layers
+        self.middle_layers = nn.ModuleList([
+            nn.Conv2d(chan_embed, chan_embed, 3, padding=1) 
+            for _ in range(max_layers - 1)
+        ])
+        
+        # Output layer
+        self.conv_out = nn.Conv2d(chan_embed, n_chan, 1)
         
         # Layer activation flags (will be set externally)
-        self.active_layers = num_layers
+        self.active_layers = max_layers
         
         self._initialize_weights()
 
     def forward(self, x):
+        # First layer (always active)
         x = self.act(self.conv1(x))
-        x = self.act(self.conv2(x))
         
-        # Progressive layers - only use if active
-        if self.active_layers >= 4:
-            x = self.act(self.conv4(x))
-        if self.active_layers >= 5:
-            x = self.act(self.conv5(x))
-        if self.active_layers >= 6:
-            x = self.act(self.conv6(x))
+        # Middle layers (controlled by active_layers)
+        num_middle = self.active_layers - 2  # -2 for input and output layers
+        for i in range(min(num_middle, len(self.middle_layers))):
+            x = self.act(self.middle_layers[i](x))
         
-        x = self.conv3(x)
+        # Output layer (always active)
+        x = self.conv_out(x)
         return torch.sigmoid(x)
 
     def set_active_layers(self, num_layers):
-        """Set number of active layers (3-6)"""
-        self.active_layers = max(3, min(6, num_layers))
+        """Set number of active layers (minimum 2: input + output)"""
+        self.active_layers = max(2, min(self.max_layers, num_layers))
         print(f"  Network depth set to {self.active_layers} layers")
 
     def get_active_parameters(self):
         """Return only parameters from active layers"""
         params = []
-        # Always active: conv1, conv2, conv3
+        # Always active: first layer and output layer
         params.extend(list(self.conv1.parameters()))
-        params.extend(list(self.conv2.parameters()))
-        params.extend(list(self.conv3.parameters()))
+        params.extend(list(self.conv_out.parameters()))
         
-        if self.active_layers >= 4:
-            params.extend(list(self.conv4.parameters()))
-        if self.active_layers >= 5:
-            params.extend(list(self.conv5.parameters()))
-        if self.active_layers >= 6:
-            params.extend(list(self.conv6.parameters()))
+        # Active middle layers
+        num_middle = self.active_layers - 2
+        for i in range(min(num_middle, len(self.middle_layers))):
+            params.extend(list(self.middle_layers[i].parameters()))
         
         return params
 
@@ -300,13 +300,14 @@ def loss_func(img1, img2, loss_f=nn.MSELoss()):
 
 
 # -------------------------------
-def compute_quality_weights(distances, alpha=2.0):
+def compute_quality_weights(distances, alpha=2.0, curriculum_threshold=1.0):
     """
     Compute quality weights for pixel bank samples based on distances.
     
     Args:
         distances: [H, W, K] tensor of distances for each pixel's K neighbors
         alpha: Sharpness parameter (higher = more selective)
+        curriculum_threshold: Fraction of samples to keep (1.0 = all, 0.25 = top 25%)
     
     Returns:
         weights: [H, W, K] tensor of sampling weights
@@ -327,6 +328,19 @@ def compute_quality_weights(distances, alpha=2.0):
     # Penalize very similar patches (distance ≈ 0) more heavily
     too_similar_penalty = torch.exp(-10 * normalized_dist)
     quality_scores = quality_scores * (1 - 0.5 * too_similar_penalty)
+    
+    # Apply curriculum learning: zero out low-quality samples
+    if curriculum_threshold < 1.0:
+        # For each pixel, find the threshold for top curriculum_threshold fraction
+        K = quality_scores.shape[-1]
+        k_to_keep = max(1, int(K * curriculum_threshold))
+        
+        # Get the threshold value for each pixel (kth largest quality score)
+        threshold_values, _ = torch.kthvalue(quality_scores, K - k_to_keep + 1, dim=-1, keepdim=True)
+        
+        # Mask out samples below threshold
+        curriculum_mask = (quality_scores >= threshold_values).float()
+        quality_scores = quality_scores * curriculum_mask
     
     # Normalize to get sampling probabilities
     weights = quality_scores / (quality_scores.sum(dim=-1, keepdim=True) + 1e-8)
@@ -451,32 +465,55 @@ def denoise_images():
         n_chan = clean_img_tensor.shape[1]
         global model
         
-        # Create full network (all 6 layers)
-        model = Network(n_chan, num_layers=6).to(device)
+        # Parse layer schedule from argument
+        layer_schedule_config = [int(x.strip()) for x in args.layer_schedule.split(',')]
         
-        # Calculate layer progression if using progressive growing
-        if args.progressive_growing:
-            # Start with 3 layers, grow to 6 layers over iterations
-            layer_schedule = []
-            for i in range(args.num_iterations):
-                # Linear progression: 3 -> 4 -> 5 -> 6
-                if args.num_iterations == 1:
-                    layers = 6
-                elif args.num_iterations == 2:
-                    layers = 4 if i == 0 else 6
-                elif args.num_iterations == 3:
-                    layers = [3, 5, 6][i]
-                else:
-                    # For more iterations, distribute evenly
-                    progress = i / (args.num_iterations - 1)
-                    layers = int(3 + progress * 3)
-                layer_schedule.append(layers)
-            print(f"Progressive growing schedule: {layer_schedule}")
+        # Determine max layers needed
+        max_layers_needed = max(layer_schedule_config)
+        
+        # Create network with enough layers to accommodate the schedule
+        model = Network(n_chan, max_layers=max_layers_needed).to(device)
+        
+        # Adjust layer schedule to match number of iterations
+        if len(layer_schedule_config) == args.num_iterations:
+            # User provided exact schedule
+            layer_schedule = layer_schedule_config
+        elif len(layer_schedule_config) == 1:
+            # Single value - use same layers for all iterations
+            layer_schedule = [layer_schedule_config[0]] * args.num_iterations
         else:
-            layer_schedule = [6] * args.num_iterations
-            print(f"Using full network (6 layers) for all iterations")
+            # Interpolate/repeat to match iterations
+            if args.num_iterations <= len(layer_schedule_config):
+                # Take first N values
+                layer_schedule = layer_schedule_config[:args.num_iterations]
+            else:
+                # Repeat pattern to fill iterations
+                layer_schedule = []
+                for i in range(args.num_iterations):
+                    idx = i % len(layer_schedule_config)
+                    layer_schedule.append(layer_schedule_config[idx])
         
-        print(f"Total network parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
+        # Apply progressive growing override if enabled
+        if args.progressive_growing and len(layer_schedule_config) == 1:
+            # Auto-generate progressive schedule
+            base_layers = layer_schedule_config[0]
+            if args.num_iterations == 1:
+                layer_schedule = [base_layers]
+            elif args.num_iterations == 2:
+                layer_schedule = [max(2, base_layers - 2), base_layers]
+            elif args.num_iterations == 3:
+                layer_schedule = [max(2, base_layers - 3), max(2, base_layers - 1), base_layers]
+            else:
+                # Linear progression
+                layer_schedule = []
+                min_layers = max(2, base_layers - args.num_iterations + 1)
+                for i in range(args.num_iterations):
+                    progress = i / (args.num_iterations - 1)
+                    layers = int(min_layers + progress * (base_layers - min_layers))
+                    layer_schedule.append(layers)
+        
+        print(f"Layer schedule for {args.num_iterations} iterations: {layer_schedule}")
+        print(f"Total network parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
 
         # Iterative bank reconstruction
         for iteration in range(args.num_iterations):
@@ -514,13 +551,29 @@ def denoise_images():
                     distances = torch.from_numpy(distances_arr.astype(np.float32)).to(device)
                     # Only use distances for the selected mm samples
                     distances = distances[..., :args.mm]
-                    quality_weights = compute_quality_weights(distances, alpha=args.alpha)
+                    
+                    # Compute curriculum threshold for this iteration
+                    if args.curriculum_learning:
+                        # Linear schedule from curriculum_start to curriculum_end
+                        progress = iteration / max(1, args.num_iterations - 1)
+                        curriculum_threshold = args.curriculum_start - progress * (args.curriculum_start - args.curriculum_end)
+                        curriculum_threshold = max(args.curriculum_end, min(args.curriculum_start, curriculum_threshold))
+                    else:
+                        curriculum_threshold = 1.0  # Use all samples
+                    
+                    quality_weights = compute_quality_weights(distances, alpha=args.alpha, curriculum_threshold=curriculum_threshold)
+                    
                     print(f"  Using quality-weighted sampling (alpha={args.alpha})")
+                    if args.curriculum_learning:
+                        print(f"  Curriculum threshold: {curriculum_threshold:.2f} (top {curriculum_threshold*100:.0f}% of samples)")
+                    
                     # Print some statistics
                     avg_weight = quality_weights.mean().item()
                     max_weight = quality_weights.max().item()
                     min_weight = quality_weights.min().item()
+                    nonzero_weights = (quality_weights > 0).float().mean().item()
                     print(f"  Weight stats - Mean: {avg_weight:.4f}, Max: {max_weight:.4f}, Min: {min_weight:.4f}")
+                    print(f"  Active samples: {nonzero_weights*100:.1f}%")
                 else:
                     print("  Distance file not found, using uniform sampling")
 
@@ -599,6 +652,10 @@ if __name__ == "__main__":
     print(f"  Iterations: {args.num_iterations}, Epochs/iter: {args.epochs_per_iter}")
     print(f"  Quality weighting: {args.use_quality_weights}, Alpha: {args.alpha}")
     print(f"  Progressive growing: {args.progressive_growing}")
+    print(f"  Layer schedule: {args.layer_schedule}")
+    print(f"  Curriculum learning: {args.curriculum_learning}")
+    if args.curriculum_learning:
+        print(f"    Start: {args.curriculum_start*100:.0f}% -> End: {args.curriculum_end*100:.0f}%")
     print("="*60)
     print("\nConstructing initial pixel banks from noisy images...")
     construct_pixel_bank()
