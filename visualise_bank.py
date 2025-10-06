@@ -78,8 +78,9 @@ def construct_pixel_bank_from_image(img_tensor, file_name_without_ext, bank_dir)
     return topk, distances
 
 def add_noise(x, noise_level, noise_type):
+    device = x.device  # get the device of input tensor
     if noise_type == 'gauss':
-        noisy = x + torch.normal(0, noise_level / 255, x.shape)
+        noisy = x + torch.normal(0, noise_level / 255, x.shape, device=device)
         noisy = torch.clamp(noisy, 0, 1)
     elif noise_type == 'poiss':
         noisy = torch.poisson(noise_level * x) / noise_level
@@ -100,6 +101,7 @@ def add_noise(x, noise_level, noise_type):
     else:
         raise ValueError("Unsupported noise type")
     return noisy
+
 
 def visualize_pixel_bank(topk_path, distances_path, pixel_coord, save_path=None):
     topk = np.load(topk_path)
