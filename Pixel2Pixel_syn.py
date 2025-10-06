@@ -260,7 +260,6 @@ class Network(nn.Module):
         self.conv_final = nn.Conv2d(chan_embed, n_chan, 1)
         
         self._initialize_weights()
-        
 
     def forward(self, x):
         x = self.act(self.conv1(x))
