@@ -290,25 +290,14 @@ def mse_loss(gt: torch.Tensor, pred: torch.Tensor) -> torch.Tensor:
 
 loss_f = nn.L1Loss() if args.loss == 'L1' else nn.MSELoss()
 
-
 def loss_func(img1, img2, loss_f=nn.MSELoss()):
     pred1 = model(img1)
     loss = loss_f(img2, pred1)
     return loss
 
-
 # -------------------------------
 def compute_quality_weights_distance(distances, alpha=2.0):
-    """
-    Compute quality weights for pixel bank samples based on distances.
-    
-    Args:
-        distances: [H, W, K] tensor of distances for each pixel's K neighbors
-        alpha: Sharpness parameter (higher = more selective)
-    
-    Returns:
-        weights: [H, W, K] tensor of sampling weights
-    """
+
     # Normalize distances per pixel to [0, 1]
     dist_min = distances.min(dim=-1, keepdim=True)[0]
     dist_max = distances.max(dim=-1, keepdim=True)[0]
