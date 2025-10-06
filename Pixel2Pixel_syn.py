@@ -271,7 +271,8 @@ class Network(nn.Module):
             x = self.act(conv_layer(x))
         
         x = self.conv_final(x)
-        return torch.sigmoid(x)
+        # return torch.sigmoid(x)
+        return x 
 
     def _initialize_weights(self):
         for m in self.modules():
