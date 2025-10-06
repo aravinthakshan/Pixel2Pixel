@@ -15,6 +15,7 @@ import torch.nn.init as init
 
 import torchvision.transforms as transforms
 from torchvision.transforms.functional import to_pil_image
+from soap import SOAP
 
 import einops
 
@@ -265,7 +266,8 @@ def denoise_images():
         model = DenoiseNet(n_chan).to(device)
         print(f"Number of parameters for {image_file}: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
 
-        optimizer = optim.AdamW(model.parameters(), lr=lr)
+        # optimizer = optim.AdamW(model.parameters(), lr=lr)
+        optimizer = SOAP(lr = lr, betas=(.95, .95), weight_decay=.01, precondition_frequency=10)
         scheduler = MultiStepLR(optimizer, milestones=[1500, 2000, 2500], gamma=0.5)
 
         for epoch in range(max_epoch):
