@@ -430,8 +430,6 @@ def denoise_images():
             
             if args.progressive_growing:
                 print(f"Network: {num_layers} conv layers")
-            if args.use == "MMR":
-                print(f"Sampling: MMR (lambda={mmr_lambda:.2f})")
             else:
                 print(f"Sampling: Distance-based (alpha={distance_alpha:.2f})")
             print(f"{'='*60}")
@@ -462,16 +460,7 @@ def denoise_images():
                     distances_arr = np.load(dist_path)
                     distances = torch.from_numpy(distances_arr.astype(np.float32)).to(device)
                     distances = distances[..., :args.mm]
-                    
-                    if args.use == "MMR":
-                        quality_weights = compute_quality_weights(
-                            distances, 
-                            patch_features=None, 
-                            lambda_param=mmr_lambda,
-                            alpha=2.0
-                        )
-                        print(f"Using MMR sampling (lambda={mmr_lambda:.2f})")
-                    
+                                        
                     # Print statistics
                     avg_weight = quality_weights.mean().item()
                     max_weight = quality_weights.max().item()
@@ -562,14 +551,9 @@ if __name__ == "__main__":
     
     if args.use_quality_weights:
         print(f"  Quality weighting: ENABLED")
-        if args.use == "MMR":
-            _, mmr_lambdas_list, _ = parse_iteration_params()
-            print(f"  Sampling strategy: MMR")
-            print(f"  MMR lambda per iteration: {mmr_lambdas_list}")
-        else:
-            _, _, distance_alphas_list = parse_iteration_params()
-            print(f"  Sampling strategy: Distance-based")
-            print(f"  Distance alpha per iteration: {distance_alphas_list}")
+        _, _, distance_alphas_list = parse_iteration_params()
+        print(f"  Sampling strategy: Distance-based")
+        print(f"  Distance alpha per iteration: {distance_alphas_list}")
     else:
         print(f"  Quality weighting: DISABLED (uniform sampling)")
     
