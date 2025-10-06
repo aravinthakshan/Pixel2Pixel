@@ -87,7 +87,7 @@ def add_noise(x, noise_level):
     return noisy
 
 
-
+# This is the only change Working Condition
 # -------------------------------
 def construct_pixel_bank_from_image(img_tensor, file_name_without_ext, bank_dir):
     """
