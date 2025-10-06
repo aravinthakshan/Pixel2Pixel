@@ -458,7 +458,8 @@ def denoise_images(params, verbose=True):
         max_layers_needed = max(layer_schedule_config)
 
         model = Network(n_chan, chan_embed=params['chan_embed'], max_layers=max_layers_needed).to(device)
-
+        model = torch.compile(model)
+        
         # Generate layer schedule
         num_iters = int(params['num_iterations'])
         if len(layer_schedule_config) == num_iters:
