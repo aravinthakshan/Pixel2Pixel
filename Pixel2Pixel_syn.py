@@ -262,40 +262,108 @@ def loss_func(img1, img2, loss_f=nn.MSELoss()):
 
 
 
-# -------------------------------
-def compute_quality_weights(distances, alpha=2.0):
+# # -------------------------------
+# def compute_quality_weights(distances, alpha=2.0):
+#     """
+#     Compute quality weights for pixel bank samples based on distances.
+    
+#     Args:
+#         distances: [H, W, K] tensor of distances for each pixel's K neighbors
+#         alpha: Sharpness parameter (higher = more selective)
+    
+#     Returns:
+#         weights: [H, W, K] tensor of sampling weights
+#     """
+#     # Normalize distances per pixel to [0, 1]
+#     # Shape: [H, W, K]
+#     dist_min = distances.min(dim=-1, keepdim=True)[0]
+#     dist_max = distances.max(dim=-1, keepdim=True)[0]
+#     dist_range = dist_max - dist_min
+#     dist_range = torch.clamp(dist_range, min=1e-8)  # Avoid division by zero
+#     normalized_dist = (distances - dist_min) / dist_range
+    
+#     # Quality score: Gaussian-like curve peaked at medium distances
+#     # We want to favor patches with normalized distance around 0.3-0.7
+#     optimal_distance = 0.5
+#     quality_scores = torch.exp(-alpha * (normalized_dist - optimal_distance) ** 2)
+    
+#     # Penalize very similar patches (distance ≈ 0) more heavily
+#     too_similar_penalty = torch.exp(-10 * normalized_dist)
+#     quality_scores = quality_scores * (1 - 0.5 * too_similar_penalty)
+    
+#     # Normalize to get sampling probabilities
+#     weights = quality_scores / (quality_scores.sum(dim=-1, keepdim=True) + 1e-8)
+    
+#     return weights
+
+def compute_quality_weights(distances, patch_features=None, lambda_param=0.5, alpha=2.0):
     """
-    Compute quality weights for pixel bank samples based on distances.
+    Compute MMR-based quality weights for pixel bank samples.
+    
+    MMR balances relevance (low distance to center pixel) with diversity 
+    (dissimilarity among selected patches).
     
     Args:
         distances: [H, W, K] tensor of distances for each pixel's K neighbors
-        alpha: Sharpness parameter (higher = more selective)
+        patch_features: [H, W, K, D] optional tensor of patch features for diversity computation
+                       If None, uses distances to approximate diversity
+        lambda_param: Trade-off between relevance and diversity (0=diversity only, 1=relevance only)
+        alpha: Sharpness parameter for converting scores to weights
     
     Returns:
-        weights: [H, W, K] tensor of sampling weights
+        weights: [H, W, K] tensor of sampling weights based on MMR scores
     """
-    # Normalize distances per pixel to [0, 1]
-    # Shape: [H, W, K]
+    H, W, K = distances.shape
+    device = distances.device
+    
+    # Normalize distances to [0, 1] for relevance scores
     dist_min = distances.min(dim=-1, keepdim=True)[0]
     dist_max = distances.max(dim=-1, keepdim=True)[0]
-    dist_range = dist_max - dist_min
-    dist_range = torch.clamp(dist_range, min=1e-8)  # Avoid division by zero
+    dist_range = torch.clamp(dist_max - dist_min, min=1e-8)
     normalized_dist = (distances - dist_min) / dist_range
     
-    # Quality score: Gaussian-like curve peaked at medium distances
-    # We want to favor patches with normalized distance around 0.3-0.7
-    optimal_distance = 0.5
-    quality_scores = torch.exp(-alpha * (normalized_dist - optimal_distance) ** 2)
+    # Relevance score: Lower distance = higher relevance
+    relevance = 1.0 - normalized_dist  # [H, W, K]
     
-    # Penalize very similar patches (distance ≈ 0) more heavily
-    too_similar_penalty = torch.exp(-10 * normalized_dist)
-    quality_scores = quality_scores * (1 - 0.5 * too_similar_penalty)
+    # Compute diversity scores
+    if patch_features is not None:
+        # Use actual patch features for diversity computation
+        # Compute pairwise similarities between patches at each pixel
+        # patch_features: [H, W, K, D]
+        feat_norm = F.normalize(patch_features, p=2, dim=-1)  # L2 normalize
+        # Compute similarity matrix: [H, W, K, K]
+        similarity_matrix = torch.einsum('hwid,hwjd->hwij', feat_norm, feat_norm)
+        # Diversity = average dissimilarity to other patches
+        diversity = 1.0 - similarity_matrix.mean(dim=-1)  # [H, W, K]
+    else:
+        # Approximate diversity using distance distribution
+        # Patches with unique distances are more diverse
+        # Compute variance of distances as a proxy for diversity
+        dist_mean = distances.mean(dim=-1, keepdim=True)
+        dist_variance = ((distances - dist_mean) ** 2).mean(dim=-1, keepdim=True)
+        dist_std = torch.sqrt(dist_variance + 1e-8)
+        
+        # Diversity score: patches with distances far from mean are more diverse
+        diversity = torch.abs(distances - dist_mean) / (dist_std + 1e-8)
+        diversity = torch.tanh(diversity)  # Normalize to [0, 1]
     
-    # Normalize to get sampling probabilities
-    weights = quality_scores / (quality_scores.sum(dim=-1, keepdim=True) + 1e-8)
+    # MMR score: Linear combination of relevance and diversity
+    mmr_scores = lambda_param * relevance + (1 - lambda_param) * diversity
+    
+    # Apply sharpening to create more selective weights
+    # Use softmax with temperature for smooth probability distribution
+    temperature = 1.0 / alpha
+    mmr_scores_scaled = mmr_scores / temperature
+    
+    # Convert to probabilities using softmax along K dimension
+    weights = F.softmax(mmr_scores_scaled, dim=-1)
+    
+    # Optional: Apply additional shaping to avoid very uniform distributions
+    # Boost high-scoring samples
+    weights = weights ** (1.0 + alpha * 0.1)
+    weights = weights / (weights.sum(dim=-1, keepdim=True) + 1e-8)
     
     return weights
-
 
 def train(model, optimizer, img_bank, quality_weights=None):
     N, H, W, C = img_bank.shape
@@ -441,7 +509,7 @@ def denoise_images():
                     distances = torch.from_numpy(distances_arr.astype(np.float32)).to(device)
                     # Only use distances for the selected mm samples
                     distances = distances[..., :args.mm]
-                    quality_weights = compute_quality_weights(distances, alpha=args.alpha)
+                    quality_weights = compute_quality_weights(distances, alpha=args.alpha) # distances, patch_features=None, lambda_param=0.5, alpha=2.0 func signature
                     print(f"Using quality-weighted sampling (alpha={args.alpha})")
                     # Print some statistics
                     avg_weight = quality_weights.mean().item()
