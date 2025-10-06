@@ -483,8 +483,10 @@ def denoise_images():
                             current_pred = torch.clamp(model(noisy_img), 0, 1)
                             prev_mse = current_mse
                             current_mse = mse_loss(clean_img_tensor, current_pred).item()
-                            print(current_mse-prev_mse==0.0)
-                                # if current_mse-prev_mse<:
+                            if (current_mse-prev_mse==0.0):
+                                print("Restarting trianing with sigmoid turned off")
+                                epoch = 0
+                                model.use_sigmoid = False
                             current_psnr = 10 * np.log10(1 / current_mse)
                         print(f"  Epoch {epoch+1}/{args.epochs_per_iter} - PSNR: {current_psnr:.2f} dB")
 
@@ -503,7 +505,7 @@ def denoise_images():
                     topk, distances = construct_pixel_bank_from_image(denoised_img, file_name_without_ext, bank_dir)
                     elapsed = time.time() - start_time
                     print(f"Bank rebuilt in {elapsed:.2f} seconds. Shape: {topk.shape}")
-
+                
             # Final evaluation
             PSNR, out_img = test(model, noisy_img, clean_img_tensor)
             out_img_pil = to_pil_image(out_img.squeeze(0))
@@ -521,6 +523,7 @@ def denoise_images():
             print(f"\nFinal Results - Image: {image_file} | PSNR: {PSNR:.2f} dB | SSIM: {SSIM:.4f}")
             avg_PSNR += PSNR
             avg_SSIM += SSIM
+            model.use_sigmoid = True
 
     avg_PSNR /= len(image_files)
     avg_SSIM /= len(image_files)
