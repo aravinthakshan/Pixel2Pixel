@@ -473,7 +473,7 @@ def denoise_images():
                                    gamma=0.5)
 
             # Train for epochs_per_iter
-
+            current_mse = 0
             for epoch in range(args.epochs_per_iter):
                 train(model, optimizer, img_bank, quality_weights)
                 scheduler.step()
