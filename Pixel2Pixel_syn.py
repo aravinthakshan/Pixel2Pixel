@@ -346,35 +346,35 @@ def train(model, optimizer, img_bank, quality_weights=None):
     return loss.item()
 
 
-def train_original(model, optimizer, img_bank):
-    """Original training function without quality weights"""
-    N, H, W, C = img_bank.shape
-    index1 = torch.randint(0, N, size=(H, W), device=device)
-    index1_exp = index1.unsqueeze(0).unsqueeze(-1).expand(1, H, W, C)
-    img1 = torch.gather(img_bank, 0, index1_exp)  # Result shape: (1, H, W, C)
-    img1 = img1.permute(0, 3, 1, 2)
+# def train_original(model, optimizer, img_bank):
+#     """Original training function without quality weights"""
+#     N, H, W, C = img_bank.shape
+#     index1 = torch.randint(0, N, size=(H, W), device=device)
+#     index1_exp = index1.unsqueeze(0).unsqueeze(-1).expand(1, H, W, C)
+#     img1 = torch.gather(img_bank, 0, index1_exp)  # Result shape: (1, H, W, C)
+#     img1 = img1.permute(0, 3, 1, 2)
 
-    index2 = torch.randint(0, N, size=(H, W), device=device)
-    eq_mask = (index2 == index1)
-    if eq_mask.any():
-        index2[eq_mask] = (index2[eq_mask] + 1) % N
-    index2_exp = index2.unsqueeze(0).unsqueeze(-1).expand(1, H, W, C)
-    img2 = torch.gather(img_bank, 0, index2_exp)
-    img2 = img2.permute(0, 3, 1, 2)
+#     index2 = torch.randint(0, N, size=(H, W), device=device)
+#     eq_mask = (index2 == index1)
+#     if eq_mask.any():
+#         index2[eq_mask] = (index2[eq_mask] + 1) % N
+#     index2_exp = index2.unsqueeze(0).unsqueeze(-1).expand(1, H, W, C)
+#     img2 = torch.gather(img_bank, 0, index2_exp)
+#     img2 = img2.permute(0, 3, 1, 2)
 
-    loss = loss_func(model, img1, img2, loss_f)
-    optimizer.zero_grad()
-    loss.backward()
-    optimizer.step()
-    return loss.item()
+#     loss = loss_func(model, img1, img2, loss_f)
+#     optimizer.zero_grad()
+#     loss.backward()
+#     optimizer.step()
+#     return loss.item()
 
 
-def test(model, noisy_img, clean_img):
-    with torch.no_grad():
-        pred = torch.clamp(model(noisy_img), 0, 1)
-        mse_val = mse_loss(clean_img, pred).item()
-        psnr = 10 * np.log10(1 / mse_val)
-    return psnr, pred
+# def test(model, noisy_img, clean_img):
+#     with torch.no_grad():
+#         pred = torch.clamp(model(noisy_img), 0, 1)
+#         mse_val = mse_loss(clean_img, pred).item()
+#         psnr = 10 * np.log10(1 / mse_val)
+#     return psnr, pred
 
 
 # -------------------------------
