@@ -4,6 +4,7 @@ import argparse
 import numpy as np
 from PIL import Image
 from skimage import io
+import matplotlib.pyplot as plt
 from skimage.metrics import peak_signal_noise_ratio as compare_psnr, structural_similarity as compare_ssim
 
 import torch
@@ -255,12 +256,10 @@ def mse_loss(gt: torch.Tensor, pred: torch.Tensor) -> torch.Tensor:
 loss_f = nn.L1Loss() if args.loss == 'L1' else nn.MSELoss()
 
 
-def loss_func(img1, img2, loss_f=nn.MSELoss()):
+def loss_func(model, img1, img2, loss_f=nn.MSELoss()):
     pred1 = model(img1)
     loss = loss_f(img2, pred1)
     return loss
-
-
 
 # -------------------------------
 def compute_quality_weights(distances, alpha=2.0):
@@ -340,7 +339,7 @@ def train(model, optimizer, img_bank, quality_weights=None):
     img2 = torch.gather(img_bank, 0, index2_exp)
     img2 = img2.permute(0, 3, 1, 2)
 
-    loss = loss_func(img1, img2, loss_f)
+    loss = loss_func(model, img1, img2, loss_f)
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
@@ -363,7 +362,7 @@ def train_original(model, optimizer, img_bank):
     img2 = torch.gather(img_bank, 0, index2_exp)
     img2 = img2.permute(0, 3, 1, 2)
 
-    loss = loss_func(img1, img2, loss_f)
+    loss = loss_func(model, img1, img2, loss_f)
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
@@ -412,7 +411,6 @@ def denoise_images():
             args.mm = 8
 
         n_chan = clean_img_tensor.shape[1]
-        global model
         model = Network(n_chan).to(device)
         print(f"Number of parameters for {image_file}: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
 
@@ -437,6 +435,8 @@ def denoise_images():
             if args.use_quality_weights:
                 dist_path = os.path.join(bank_dir, file_name_without_ext + '_distances.npy')
                 if os.path.exists(dist_path):
+
+
                     distances_arr = np.load(dist_path)
                     distances = torch.from_numpy(distances_arr.astype(np.float32)).to(device)
                     # Only use distances for the selected mm samples
@@ -512,6 +512,34 @@ def denoise_images():
     print(f"\n{'='*60}")
     print(f"Average PSNR: {avg_PSNR:.2f} dB, Average SSIM: {avg_SSIM:.4f}")
     print(f"{'='*60}")
+
+
+# Visualization block
+def visualize_results(clean_img_tensor, noisy_img, denoised_img, file_name_without_ext):
+    """
+    Display the clean, noisy, and denoised image side by side.
+    """
+    clean_img_np = clean_img_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy()
+    noisy_img_np = noisy_img.squeeze(0).permute(1, 2, 0).cpu().numpy()
+    denoised_img_np = denoised_img.squeeze(0).permute(1, 2, 0).cpu().numpy()
+
+    fig, axs = plt.subplots(1, 3, figsize=(15, 5))
+    axs[0].imshow(clean_img_np)
+    axs[0].set_title("Clean Image")
+    axs[0].axis("off")
+
+    axs[1].imshow(noisy_img_np)
+    axs[1].set_title("Noisy Image")
+    axs[1].axis("off")
+
+    axs[2].imshow(denoised_img_np)
+    axs[2].set_title("Denoised Image")
+    axs[2].axis("off")
+
+    plt.tight_layout()
+    plt.savefig(f"{args.out_image}/{file_name_without_ext}_comparison.png")
+    plt.show()
+
 
 # -------------------------------
 if __name__ == "__main__":
