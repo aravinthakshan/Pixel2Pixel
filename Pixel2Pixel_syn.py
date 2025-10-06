@@ -38,20 +38,20 @@ OPTUNA_CONFIG = {
     
     # Hyperparameter search spaces
     'search_space': {
-        'layer_schedule': ['3,5,6', '6,9,12', '4,8,12', '5,10,15'],
-        'alpha': [1.5, 2.0, 2.5, 3.0],
+        'layer_schedule': ['3,5,6', '6,9,12',],
+        'alpha': [ 2.0,],
         'curriculum_start': [0.8, 1.0],
         'curriculum_end': [0.15, 0.25, 0.35],
-        'num_iterations': [2, 3, 4],
-        'epochs_per_iter': [800, 1000, 1200],
-        'lr': [0.0005, 0.001, 0.0015],
-        'chan_embed': [48, 64, 96],
+        'num_iterations': [1, 3,],
+        'epochs_per_iter': [ 1000, 3000],
+        'lr': [ 0.001],
+        'chan_embed': [64, 96],
     },
     
     # Optuna settings
     'n_trials': 100,  # Number of trials to run
     'timeout': None,  # Timeout in seconds (None = no timeout)
-    'n_jobs': 1,  # Parallel jobs (1 for GPU to avoid OOM)
+    'n_jobs': 2,  # Parallel jobs (1 for GPU to avoid OOM)
 }
 
 # GPU Optimization settings
