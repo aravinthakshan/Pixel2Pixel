@@ -483,7 +483,7 @@ def denoise_images():
                             current_pred = torch.clamp(model(noisy_img), 0, 1)
                             prev_mse = current_mse
                             current_mse = mse_loss(clean_img_tensor, current_pred).item()
-                            print(current_mse-prev_mse)
+                            print(current_mse-prev_mse==0.0)
                                 # if current_mse-prev_mse<:
                             current_psnr = 10 * np.log10(1 / current_mse)
                         print(f"  Epoch {epoch+1}/{args.epochs_per_iter} - PSNR: {current_psnr:.2f} dB")
