@@ -484,6 +484,8 @@ def denoise_images():
                             current_pred = torch.clamp(model(noisy_img), 0, 1)
                             prev_mse = current_mse
                             current_mse = mse_loss(clean_img_tensor, current_pred).item()
+
+                            #Sigmoid can cause the weights to move to 0, Removing final sigmoid layer if that happens
                             if (current_mse-prev_mse==0.0):
                                 print("Restarting trianing with sigmoid turned off")
                                 model.use_sigmoid = False
