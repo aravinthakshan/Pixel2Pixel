@@ -40,7 +40,8 @@ OPTUNA_CONFIG = {
     'search_space': {
         'layer_schedule': ['3,5,6', '6,9,12',],
         'alpha': [ 2.0,],
-        'curriculum_start': [0.8, 1.0],
+        'curriculum_learning': [True, False],  
+        'curriculum_start': [0.8],
         'curriculum_end': [0.15, 0.25, 0.35],
         'num_iterations': [1, 3,],
         'epochs_per_iter': [ 1000, 3000],
@@ -72,7 +73,6 @@ FIXED_PARAMS = {
     'loss': 'L1',
     'use_quality_weights': True,
     'progressive_growing': True,
-    'curriculum_learning': True,
 }
 
 # ========================================================================
