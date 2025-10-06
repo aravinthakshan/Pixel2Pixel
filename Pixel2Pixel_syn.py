@@ -51,7 +51,7 @@ OPTUNA_CONFIG = {
     # Optuna settings
     'n_trials': 100,  # Number of trials to run
     'timeout': None,  # Timeout in seconds (None = no timeout)
-    'n_jobs': 2,  # Parallel jobs (1 for GPU to avoid OOM)
+    'n_jobs': 1,  # Parallel jobs (1 for GPU to avoid OOM)
 }
 
 # GPU Optimization settings
