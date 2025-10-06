@@ -55,3 +55,5 @@ def visualize_denoising(sample_idx=0):
     plt.suptitle(f"Sample: {image_file}", fontsize=14)
     plt.tight_layout()
     plt.show()
+
+visualize_denoising(5)
