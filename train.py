@@ -688,7 +688,7 @@ if __name__ == "__main__":
     print(f"Configuration:")
     print(f"  Dataset: {args.dataset}")
     
-    if args.dataset in ['kodak', 'mcmaster', 'polyu']:
+    if args.dataset in ['kodak', 'mcmaster']:
         print(f"  Noise type: {args.nt}, level: {args.nl}")
         print(f"  Iterations: {args.num_iterations}, Epochs/iter: {args.epochs_per_iter}")
         
@@ -713,7 +713,7 @@ if __name__ == "__main__":
         print("\nStarting iterative denoising...")
         denoise_syn(args)
     
-    if args.dataset in ['sidd']:
+    if args.dataset in ['sidd', 'polyu']:
         print("Constructing pixel banks from noisy images ...")
         construct_pixel_bank_real(args)
         print("Starting denoising using constructed pixel banks ...")
