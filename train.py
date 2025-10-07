@@ -19,23 +19,34 @@ import einops
 
 # -------------------------------
 parser = argparse.ArgumentParser('Pixel2Pixel')
+# Paths
 parser.add_argument('--data_path', default='./data', type=str, help='Path to the data')
-parser.add_argument('--device', default='cuda:0', type=str, help='Device type - CUDA or CPU')
-parser.add_argument('--dataset', default='kodak', type=str, help='Dataset name')
-parser.add_argument('--save', default='./results', type=str, help='Directory to save pixel bank results')
+parser.add_argument('--bank_dir', default='./results', type=str, help='Directory to save pixel bank results')
 parser.add_argument('--out_image', default='./results_image', type=str, help='Directory to save denoised images')
+
+# Dynamic run arguments
+parser.add_argument('--device', default='cuda:0', type=str, help='Device type - CUDA or CPU')
+parser.add_argument('--loss', default='L1', type=str, help='Loss function type')
+parser.add_argument('--num_iterations', default=3, type=int, help='Number of bank reconstruction iterations')
+parser.add_argument('--epochs_per_iter', default=1000, type=int, help='Epochs per iteration')
+parser.add_argument('--dataset', default='kodak', type=str, help='Dataset name')
+
+#Model HPs
 parser.add_argument('--ws', default=40, type=int, help='Window size')
 parser.add_argument('--ps', default=7, type=int, help='Patch size')
 parser.add_argument('--nn', default=16, type=int, help='Number of nearest neighbors to search')
 parser.add_argument('--mm', default=8, type=int, help='Number of pixels in pixel bank to use for training')
+
+# Arguments for syn datasets
 parser.add_argument('--nl', default=0.2, type=float, help='Noise level, for saltpepper and impulse noise, enter half the noise level.')
 parser.add_argument('--nt', default='bernoulli', type=str, help='Noise type: gauss, poiss, saltpepper, bernoulli, impulse')
-parser.add_argument('--loss', default='L1', type=str, help='Loss function type')
-parser.add_argument('--num_iterations', default=3, type=int, help='Number of bank reconstruction iterations')
-parser.add_argument('--epochs_per_iter', default=1000, type=int, help='Epochs per iteration')
+parser.add_argument('--progressive_growing', default=False, type=bool, help='Use progressive network growing')
 parser.add_argument('--use_quality_weights', default=True, type=bool, help='Use quality-based sampling weights')
 parser.add_argument('--alpha', default=2.0, type=float, help='Sharpness of quality scoring (higher = more selective)')
-parser.add_argument('--progressive_growing', default=False, type=bool, help='Use progressive network growing')
+
+# Arguements for real datasets
+parser.add_argument('--gt_dir', default='GT', type=str, help='Folder name for ground truth images')
+parser.add_argument('--noisy_dir', default='Noisy', type=str, help='Folder name for noisy images')
 
 # Progressive growing parameters
 parser.add_argument('--nn_layers', default='6,9,12', type=str, 
@@ -67,7 +78,6 @@ def parse_iteration_params(args):
     nn_layers = [int(x) for x in args.nn_layers.split(',')]
     mmr_lambdas = [float(x) for x in args.mmr_lambdas.split(',')]
     distance_alphas = [float(x) for x in args.distance_alphas.split(',')]
-
     num_iters = args.num_iterations
 
     if len(nn_layers) < num_iters:
@@ -211,7 +221,7 @@ def construct_pixel_bank(args):
     noise_level = args.nl
     noise_type = args.nt
 
-    bank_dir = os.path.join(args.save, '_'.join(
+    bank_dir = os.path.join(args.bank_dir, '_'.join(
         str(i) for i in [args.dataset, args.nt, args.nl, args.ws, args.ps, args.nn, args.loss]))
     os.makedirs(bank_dir, exist_ok=True)
 
@@ -316,7 +326,7 @@ def denoise_images(args):
     noise_level = args.nl
     device = args.device
 
-    bank_dir = os.path.join(args.save, '_'.join(
+    bank_dir = os.path.join(args.bank_dir, '_'.join(
         str(i) for i in [args.dataset, args.nt, args.nl, args.ws, args.ps, args.nn, args.loss]))
     image_folder = os.path.join(args.data_path, args.dataset)
     image_files = sorted(os.listdir(image_folder))
