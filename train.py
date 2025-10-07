@@ -692,6 +692,7 @@ if __name__ == "__main__":
         print(f"  Noise type: {args.nt}, level: {args.nl}")
         print(f"  Iterations: {args.num_iterations}, Epochs/iter: {args.epochs_per_iter}")
         
+        print(args.progressive_growing, args.use_quality_weights)
         if args.progressive_growing:
             nn_layers_list, _, _ = parse_iteration_params(args)
             print(f"  Progressive Growing: ENABLED")
