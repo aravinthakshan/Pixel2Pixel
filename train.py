@@ -40,7 +40,7 @@ parser.add_argument('--mm', default=8, type=int, help='Number of pixels in pixel
 parser.add_argument('--nl', default=0.2, type=float, help='Noise level, for saltpepper and impulse noise, enter half the noise level.')
 parser.add_argument('--nt', default='bernoulli', type=str, help='Noise type: gauss, poiss, saltpepper, bernoulli, impulse')
 parser.add_argument('--progressive_growing', default=False, type=bool, help='Use progressive network growing')
-parser.add_argument('--use_quality_weights', default=True, type=bool, help='Use quality-based sampling weights')
+parser.add_argument('--use_quality_weights', default=False, type=bool, help='Use quality-based sampling weights')
 parser.add_argument('--alpha', default=2.0, type=float, help='Sharpness of quality scoring (higher = more selective)')
 
 # Arguements for real datasets
