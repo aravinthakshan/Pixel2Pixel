@@ -2,9 +2,9 @@ import torch.nn as nn
 import torch
 import torch.nn.init as init
 
-class Network(nn.Module):
+class NetworkSyn(nn.Module):
     def __init__(self, n_chan, chan_embed=64, num_conv_layers=6, use_sigmoid = True):
-        super(Network, self).__init__()
+        super(NetworkSyn, self).__init__()
         self.act = nn.LeakyReLU(negative_slope=0.2, inplace=True)
         self.num_conv_layers = num_conv_layers
         self.use_sigmoid = use_sigmoid
@@ -34,6 +34,37 @@ class Network(nn.Module):
         if self.use_sigmoid:
             return torch.sigmoid(x)
         
+        return x
+
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                init.orthogonal_(m.weight)
+                if m.bias is not None:
+                    init.constant_(m.bias, 0)
+            elif isinstance(m, nn.BatchNorm2d):
+                init.constant_(m.weight, 1)
+                init.constant_(m.bias, 0)
+
+class NetworkReal(nn.Module):
+    def __init__(self, n_chan, chan_embed=64):
+        super(NetworkReal, self).__init__()
+        self.act = nn.LeakyReLU(negative_slope=0.2, inplace=True)
+        self.conv1 = nn.Conv2d(n_chan, chan_embed, 3, padding=1)
+        self.conv2 = nn.Conv2d(chan_embed, chan_embed, 3, padding=1)
+        self.conv4 = nn.Conv2d(chan_embed, chan_embed, 3, padding=1)
+        self.conv5 = nn.Conv2d(chan_embed, chan_embed, 3, padding=1)
+        self.conv6 = nn.Conv2d(chan_embed, chan_embed, 3, padding=1)
+        self.conv3 = nn.Conv2d(chan_embed, n_chan, 1)
+        self._initialize_weights()
+
+    def forward(self, x):
+        x = self.act(self.conv1(x))
+        x = self.act(self.conv2(x))
+        x = self.act(self.conv4(x))
+        x = self.act(self.conv5(x))
+        x = self.act(self.conv6(x))
+        x = self.conv3(x)
         return x
 
     def _initialize_weights(self):
