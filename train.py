@@ -114,7 +114,7 @@ def add_noise(x, noise_type, noise_level):
 
 def construct_pixel_bank_real(args):
     # The pixel banks will be saved in a directory constructed from dataset parameters
-    bank_dir = os.path.join(args.save, args.dataset, '_'.join(str(i) for i in [args.ws, args.ps, args.nn, args.loss]))
+    bank_dir = os.path.join(args.bank_dir, args.dataset, '_'.join(str(i) for i in [args.ws, args.ps, args.nn, args.loss]))
     os.makedirs(bank_dir, exist_ok=True)
 
     WINDOW_SIZE = args.ws
@@ -446,7 +446,7 @@ def test(model, noisy_img, clean_img):
 def denoise_real(args):
     device = args.device
     # The pixel bank directory should match the one used in construction
-    bank_dir = os.path.join(args.save, args.dataset, '_'.join(str(i) for i in [args.ws, args.ps, args.nn, args.loss]))
+    bank_dir = os.path.join(args.bank_dir, args.dataset, '_'.join(str(i) for i in [args.ws, args.ps, args.nn, args.loss]))
     gt_folder = os.path.join(args.data_path, args.dataset, args.GT)
     gt_files = sorted(os.listdir(gt_folder))
 
