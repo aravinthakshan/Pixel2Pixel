@@ -447,7 +447,7 @@ def denoise_real(args):
     device = args.device
     # The pixel bank directory should match the one used in construction
     bank_dir = os.path.join(args.bank_dir, args.dataset, '_'.join(str(i) for i in [args.ws, args.ps, args.nn, args.loss]))
-    gt_folder = os.path.join(args.data_path, args.dataset, args.GT)
+    gt_folder = os.path.join(args.data_path, args.dataset, args.gt_dir)
     gt_files = sorted(os.listdir(gt_folder))
 
     os.makedirs(args.out_image, exist_ok=True)
