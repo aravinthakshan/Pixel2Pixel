@@ -53,6 +53,8 @@ torch.backends.cudnn.benchmark = False
 
 transform = transforms.Compose([transforms.ToTensor()])
 
+args = parser.parse_args()
+
 def mse_loss(gt: torch.Tensor, pred: torch.Tensor) -> torch.Tensor:
     return nn.MSELoss()(gt, pred)
 
