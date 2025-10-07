@@ -385,7 +385,7 @@ def train_real(model, optimizer, img_bank, args):
     img2 = torch.gather(img_bank, 0, index2_exp)
     img2 = img2.permute(0, 3, 1, 2)
 
-    loss = loss_func(img1, img2, loss_f)
+    loss = loss_func(model, img1, img2, loss_f)
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
