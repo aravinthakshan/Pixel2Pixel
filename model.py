@@ -508,6 +508,6 @@ if __name__ == "__main__":
     
     print("="*60)
     print("\nConstructing initial pixel banks from noisy images...")
-    construct_pixel_bank()
+    construct_pixel_bank(args)
     print("\nStarting iterative denoising with progressive growing...")
-    denoise_images()
+    denoise_images(args)
