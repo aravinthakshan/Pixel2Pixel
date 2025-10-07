@@ -122,7 +122,7 @@ def construct_pixel_bank_real(args):
     NUM_NEIGHBORS = args.nn
     loss_type = args.loss
 
-    noisy_folder = os.path.join(args.data_path, args.dataset, args.Noisy)
+    noisy_folder = os.path.join(args.data_path, args.dataset, args.noisy_dir)
     image_files = sorted(os.listdir(noisy_folder))
 
     pad_sz = WINDOW_SIZE // 2 + PATCH_SIZE // 2
