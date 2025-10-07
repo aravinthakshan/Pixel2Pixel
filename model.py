@@ -420,7 +420,7 @@ def denoise_images(args):
             current_mse = 0
             epoch = 0
             while(epoch <(args.epochs_per_iter)):
-                train(model, optimizer, img_bank, quality_weights)
+                train(model, optimizer, img_bank, args, quality_weights)
                 scheduler.step()
                 
                 if (epoch + 1) % 3000 == 0:
