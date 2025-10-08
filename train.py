@@ -211,31 +211,54 @@ def construct_pixel_bank_real(args):
 
     print("Pixel bank construction completed for all images.")
 
+def anscombe_transform(img):
+    """
+    Apply Anscombe transform to stabilize variance for Poisson noise.
+    Transform: 2 * sqrt(x + 3/8)
+    """
+    return 2 * torch.sqrt(torch.clamp(img + 3/8, min=0))
+
+def inverse_anscombe_transform(img):
+    """
+    Inverse Anscombe transform.
+    Inverse: (x/2)^2 - 3/8
+    """
+    return torch.clamp((img / 2) ** 2 - 3/8, min=0)
 
 def construct_pixel_bank_from_image(img_tensor, file_name_without_ext, bank_dir, args):
     """
     Construct pixel bank from a given image tensor.
-    img_tensor: [1, C, H, W] tensor on GPU
-    Returns: topk tensor and distance tensor for quality scoring
+    For Poisson noise, applies Anscombe transform before distance computation.
     """
-
     WINDOW_SIZE = args.ws
     PATCH_SIZE = args.ps
     NUM_NEIGHBORS = args.nn
     loss_type = args.loss
+    noise_type = args.nt
     
     pad_sz = WINDOW_SIZE // 2 + PATCH_SIZE // 2
     center_offset = WINDOW_SIZE // 2
-    blk_sz = 64  # Block size for processing
+    blk_sz = 64
 
-    img = img_tensor  # Already on GPU
+    img = img_tensor  # [1, C, H, W] on GPU
+    
+    # Apply Anscombe transform for Poisson noise before distance computation
+    if noise_type == 'poiss':
+        img_for_distance = anscombe_transform(img)
+    else:
+        img_for_distance = img
 
-    # Pad image and extract patches
-    img_pad = F.pad(img, (pad_sz, pad_sz, pad_sz, pad_sz), mode='reflect')
+    # Pad image and extract patches (using transformed image for Poisson)
+    img_pad = F.pad(img_for_distance, (pad_sz, pad_sz, pad_sz, pad_sz), mode='reflect')
     img_unfold = F.unfold(img_pad, kernel_size=PATCH_SIZE, padding=0, stride=1)
     H_new = img.shape[-2] + WINDOW_SIZE
     W_new = img.shape[-1] + WINDOW_SIZE
     img_unfold = einops.rearrange(img_unfold, 'b c (h w) -> b c h w', h=H_new, w=W_new)
+
+    # Also need original image patches for the actual pixel bank
+    img_pad_orig = F.pad(img, (pad_sz, pad_sz, pad_sz, pad_sz), mode='reflect')
+    img_unfold_orig = F.unfold(img_pad_orig, kernel_size=PATCH_SIZE, padding=0, stride=1)
+    img_unfold_orig = einops.rearrange(img_unfold_orig, 'b c (h w) -> b c h w', h=H_new, w=W_new)
 
     num_blk_w = img.shape[-1] // blk_sz
     num_blk_h = img.shape[-2] // blk_sz
@@ -243,7 +266,6 @@ def construct_pixel_bank_from_image(img_tensor, file_name_without_ext, bank_dir,
     topk_list = []
     distance_list = []
 
-    # Iterate over blocks in the image
     for blk_i in range(num_blk_w):
         for blk_j in range(num_blk_h):
             start_h = blk_j * blk_sz
@@ -251,14 +273,20 @@ def construct_pixel_bank_from_image(img_tensor, file_name_without_ext, bank_dir,
             start_w = blk_i * blk_sz
             end_w = (blk_i + 1) * blk_sz + WINDOW_SIZE
 
+            # Process transformed image for distance computation
             sub_img_uf = img_unfold[..., start_h:end_h, start_w:end_w]
+            # Process original image for pixel values
+            sub_img_uf_orig = img_unfold_orig[..., start_h:end_h, start_w:end_w]
             sub_img_shape = sub_img_uf.shape
 
             if is_window_size_even:
                 sub_img_uf_inp = sub_img_uf[..., :-1, :-1]
+                sub_img_uf_inp_orig = sub_img_uf_orig[..., :-1, :-1]
             else:
                 sub_img_uf_inp = sub_img_uf
+                sub_img_uf_inp_orig = sub_img_uf_orig
 
+            # Extract windows from transformed image for distance
             patch_windows = F.unfold(sub_img_uf_inp, kernel_size=WINDOW_SIZE, padding=0, stride=1)
             patch_windows = einops.rearrange(
                 patch_windows,
@@ -267,6 +295,16 @@ def construct_pixel_bank_from_image(img_tensor, file_name_without_ext, bank_dir,
                 h=blk_sz, w=blk_sz
             )
 
+            # Extract windows from original image for pixel bank
+            patch_windows_orig = F.unfold(sub_img_uf_inp_orig, kernel_size=WINDOW_SIZE, padding=0, stride=1)
+            patch_windows_orig = einops.rearrange(
+                patch_windows_orig,
+                'b (c k1 k2 k3 k4) (h w) -> b (c k1 k2) (k3 k4) h w',
+                k1=PATCH_SIZE, k2=PATCH_SIZE, k3=WINDOW_SIZE, k4=WINDOW_SIZE,
+                h=blk_sz, w=blk_sz
+            )
+
+            # Center pixel from transformed image for distance
             img_center = einops.rearrange(
                 sub_img_uf,
                 'b (c k1 k2) h w -> b (c k1 k2) 1 h w',
@@ -275,6 +313,7 @@ def construct_pixel_bank_from_image(img_tensor, file_name_without_ext, bank_dir,
             )
             img_center = img_center[..., center_offset:center_offset + blk_sz, center_offset:center_offset + blk_sz]
 
+            # Compute distances using transformed values (variance-stabilized)
             if loss_type == 'L2':
                 distance = torch.sum((img_center - patch_windows) ** 2, dim=1)
             elif loss_type == 'L1':
@@ -290,8 +329,9 @@ def construct_pixel_bank_from_image(img_tensor, file_name_without_ext, bank_dir,
                 dim=-3
             )
 
+            # Use original (non-transformed) patches for the pixel bank
             patch_windows_reshape = einops.rearrange(
-                patch_windows,
+                patch_windows_orig,  # Use original patches here!
                 'b (c k1 k2) (k3 k4) h w -> b c (k1 k2) (k3 k4) h w',
                 k1=PATCH_SIZE, k2=PATCH_SIZE, k3=WINDOW_SIZE, k4=WINDOW_SIZE
             )
@@ -301,7 +341,7 @@ def construct_pixel_bank_from_image(img_tensor, file_name_without_ext, bank_dir,
             topk_list.append(topk)
             distance_list.append(topk_distances)
 
-    # Merge the results from all blocks to form the pixel bank
+    # Merge results
     topk = torch.cat(topk_list, dim=0)
     topk = einops.rearrange(topk, '(w1 w2) c k h w -> k c (w2 h) (w1 w)', w1=num_blk_w, w2=num_blk_h)
     topk = topk.permute(2, 3, 0, 1)
@@ -315,6 +355,110 @@ def construct_pixel_bank_from_image(img_tensor, file_name_without_ext, bank_dir,
     np.save(os.path.join(bank_dir, file_name_without_ext + '_distances'), distances.cpu().numpy())
 
     return topk, distances
+
+# def construct_pixel_bank_from_image(img_tensor, file_name_without_ext, bank_dir, args):
+#     """
+#     Construct pixel bank from a given image tensor.
+#     img_tensor: [1, C, H, W] tensor on GPU
+#     Returns: topk tensor and distance tensor for quality scoring
+#     """
+
+#     WINDOW_SIZE = args.ws
+#     PATCH_SIZE = args.ps
+#     NUM_NEIGHBORS = args.nn
+#     loss_type = args.loss
+    
+#     pad_sz = WINDOW_SIZE // 2 + PATCH_SIZE // 2
+#     center_offset = WINDOW_SIZE // 2
+#     blk_sz = 64  # Block size for processing
+
+#     img = img_tensor  # Already on GPU
+
+#     # Pad image and extract patches
+#     img_pad = F.pad(img, (pad_sz, pad_sz, pad_sz, pad_sz), mode='reflect')
+#     img_unfold = F.unfold(img_pad, kernel_size=PATCH_SIZE, padding=0, stride=1)
+#     H_new = img.shape[-2] + WINDOW_SIZE
+#     W_new = img.shape[-1] + WINDOW_SIZE
+#     img_unfold = einops.rearrange(img_unfold, 'b c (h w) -> b c h w', h=H_new, w=W_new)
+
+#     num_blk_w = img.shape[-1] // blk_sz
+#     num_blk_h = img.shape[-2] // blk_sz
+#     is_window_size_even = (WINDOW_SIZE % 2 == 0)
+#     topk_list = []
+#     distance_list = []
+
+#     # Iterate over blocks in the image
+#     for blk_i in range(num_blk_w):
+#         for blk_j in range(num_blk_h):
+#             start_h = blk_j * blk_sz
+#             end_h = (blk_j + 1) * blk_sz + WINDOW_SIZE
+#             start_w = blk_i * blk_sz
+#             end_w = (blk_i + 1) * blk_sz + WINDOW_SIZE
+
+#             sub_img_uf = img_unfold[..., start_h:end_h, start_w:end_w]
+#             sub_img_shape = sub_img_uf.shape
+
+#             if is_window_size_even:
+#                 sub_img_uf_inp = sub_img_uf[..., :-1, :-1]
+#             else:
+#                 sub_img_uf_inp = sub_img_uf
+
+#             patch_windows = F.unfold(sub_img_uf_inp, kernel_size=WINDOW_SIZE, padding=0, stride=1)
+#             patch_windows = einops.rearrange(
+#                 patch_windows,
+#                 'b (c k1 k2 k3 k4) (h w) -> b (c k1 k2) (k3 k4) h w',
+#                 k1=PATCH_SIZE, k2=PATCH_SIZE, k3=WINDOW_SIZE, k4=WINDOW_SIZE,
+#                 h=blk_sz, w=blk_sz
+#             )
+
+#             img_center = einops.rearrange(
+#                 sub_img_uf,
+#                 'b (c k1 k2) h w -> b (c k1 k2) 1 h w',
+#                 k1=PATCH_SIZE, k2=PATCH_SIZE,
+#                 h=sub_img_shape[-2], w=sub_img_shape[-1]
+#             )
+#             img_center = img_center[..., center_offset:center_offset + blk_sz, center_offset:center_offset + blk_sz]
+
+#             if loss_type == 'L2':
+#                 distance = torch.sum((img_center - patch_windows) ** 2, dim=1)
+#             elif loss_type == 'L1':
+#                 distance = torch.sum(torch.abs(img_center - patch_windows), dim=1)
+#             else:
+#                 raise ValueError(f"Unsupported loss type: {loss_type}")
+
+#             topk_distances, sort_indices = torch.topk(
+#                 distance,
+#                 k=NUM_NEIGHBORS,
+#                 largest=False,
+#                 sorted=True,
+#                 dim=-3
+#             )
+
+#             patch_windows_reshape = einops.rearrange(
+#                 patch_windows,
+#                 'b (c k1 k2) (k3 k4) h w -> b c (k1 k2) (k3 k4) h w',
+#                 k1=PATCH_SIZE, k2=PATCH_SIZE, k3=WINDOW_SIZE, k4=WINDOW_SIZE
+#             )
+#             patch_center = patch_windows_reshape[:, :, patch_windows_reshape.shape[2] // 2, ...]
+#             topk = torch.gather(patch_center, dim=-3,
+#                                 index=sort_indices.unsqueeze(1).repeat(1, 3, 1, 1, 1))
+#             topk_list.append(topk)
+#             distance_list.append(topk_distances)
+
+#     # Merge the results from all blocks to form the pixel bank
+#     topk = torch.cat(topk_list, dim=0)
+#     topk = einops.rearrange(topk, '(w1 w2) c k h w -> k c (w2 h) (w1 w)', w1=num_blk_w, w2=num_blk_h)
+#     topk = topk.permute(2, 3, 0, 1)
+    
+#     distances = torch.cat(distance_list, dim=0)
+#     distances = einops.rearrange(distances, '(w1 w2) k h w -> k (w2 h) (w1 w)', w1=num_blk_w, w2=num_blk_h)
+#     distances = distances.permute(1, 2, 0)
+
+#     # Save pixel bank and distances
+#     np.save(os.path.join(bank_dir, file_name_without_ext), topk.cpu().numpy())
+#     np.save(os.path.join(bank_dir, file_name_without_ext + '_distances'), distances.cpu().numpy())
+
+#     return topk, distances
 
 def construct_pixel_bank(args):
     noise_level = args.nl
