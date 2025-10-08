@@ -501,7 +501,9 @@ def denoise_real(args):
         noisy_img_pil.save(noisy_img_save_path)
 
         out_img_loaded = io.imread(out_img_save_path)
-        SSIM, _ = compare_ssim(clean_img_np, out_img_loaded, full=True, multichannel=True)
+        min_dim = min(clean_img_np.shape[0], clean_img_np.shape[1])
+        win_size = min(7, min_dim if min_dim % 2 == 1 else min_dim - 1)
+        SSIM, _ = compare_ssim(clean_img_np, out_img_loaded, full=True, channel_axis=2, win_size=win_size)
         print(f"Image: {image_file} | PSNR: {PSNR:.2f} dB | SSIM: {SSIM:.4f}")
         avg_PSNR += PSNR
         avg_SSIM += SSIM
