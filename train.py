@@ -39,7 +39,6 @@ parser.add_argument('--mm', default=8, type=int, help='Number of pixels in pixel
 # Arguments for syn datasets
 parser.add_argument('--nl', default=0.2, type=float, help='Noise level, for saltpepper and impulse noise, enter half the noise level.')
 parser.add_argument('--nt', default='bernoulli', type=str, help='Noise type: gauss, poiss, saltpepper, bernoulli, impulse')
-parser.add_argument('--progressive_growing', default=False, type=bool, help='Use progressive network growing')
 parser.add_argument('--use_quality_weights', default=False, type=bool, help='Use quality-based sampling weights')
 parser.add_argument('--alpha', default=2.0, type=float, help='Sharpness of quality scoring (higher = more selective)')
 
@@ -50,10 +49,6 @@ parser.add_argument('--noisy_dir', default='Noisy', type=str, help='Folder name 
 # Progressive growing parameters
 parser.add_argument('--nn_layers', default='6,9,12', type=str, 
                    help='Comma-separated number of conv layers per iteration (e.g., "6,9,12")')
-parser.add_argument('--mmr_lambdas', default='0.8,0.5,0.2', type=str,
-                   help='Comma-separated lambda values for MMR per iteration (e.g., "0.8,0.5,0.2")')
-parser.add_argument('--distance_alphas', default='2.0,2.5,3.0', type=str,
-                   help='Comma-separated alpha values for distance-based sampling per iteration (e.g., "2.0,2.5,3.0")')
 
 torch.manual_seed(123)
 torch.cuda.manual_seed(123)
@@ -75,18 +70,12 @@ def loss_func(model, img1, img2, loss_f=nn.MSELoss()):
 
 def parse_iteration_params(args):
     nn_layers = [int(x) for x in args.nn_layers.split(',')]
-    mmr_lambdas = [float(x) for x in args.mmr_lambdas.split(',')]
-    distance_alphas = [float(x) for x in args.distance_alphas.split(',')]
     num_iters = args.num_iterations
 
     if len(nn_layers) < num_iters:
         nn_layers.extend([nn_layers[-1]] * (num_iters - len(nn_layers)))
-    if len(mmr_lambdas) < num_iters:
-        mmr_lambdas.extend([mmr_lambdas[-1]] * (num_iters - len(mmr_lambdas)))
-    if len(distance_alphas) < num_iters:
-        distance_alphas.extend([distance_alphas[-1]] * (num_iters - len(distance_alphas)))
     
-    return nn_layers[:num_iters], mmr_lambdas[:num_iters], distance_alphas[:num_iters]
+    return nn_layers[:num_iters]
 
 def add_noise(x, noise_type, noise_level):
     if noise_type == 'gauss':
@@ -526,7 +515,7 @@ def denoise_syn(args):
     os.makedirs(args.out_image, exist_ok=True)
 
     # Parse progressive parameters
-    nn_layers_list, mmr_lambdas_list, distance_alphas_list = parse_iteration_params(args)
+    nn_layers_list = parse_iteration_params(args)
 
     lr = 0.001
     avg_PSNR = 0
@@ -554,30 +543,17 @@ def denoise_syn(args):
 
         n_chan = clean_img_tensor.shape[1]
         
-        # Iterative bank reconstruction with progressive growing
+        # Iterative bank reconstruction
         for iteration in range(args.num_iterations):
             print(f"\n{'='*60}")
             print(f"Image: {image_file} | Iteration {iteration + 1}/{args.num_iterations}")
             
             # Get parameters for this iteration
             num_layers = nn_layers_list[iteration]
-            mmr_lambda = mmr_lambdas_list[iteration]
-            distance_alpha = distance_alphas_list[iteration]
-            
-            #PRINT STATEMENT
-            # if args.progressive_growing:
-            #     print(f"Network: {num_layers} conv layers")
-            # print(f"Sampling: Distance-based (alpha={distance_alpha:.2f})")
-            # print(f"{'='*60}")
             
             # Create network with specified number of layers
-            if args.progressive_growing:
-                model = NetworkSyn(n_chan, num_conv_layers=num_layers).to(device)
-            else:
-                model = NetworkSyn(n_chan, num_conv_layers=6).to(device)  # Default 6 layers
+            model = NetworkSyn(n_chan, num_conv_layers=num_layers).to(device)
             
-            #PRINT STATEMENT
-            #print(f"Number of parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
             optimizer = optim.AdamW(model.parameters(), lr=lr)
             
             # Load current pixel bank
@@ -588,7 +564,7 @@ def denoise_syn(args):
             img_bank = img_bank[:args.mm]
             img_bank = torch.from_numpy(img_bank).to(device)
 
-            # Load distances and compute quality weights with iteration-specific parameters
+            # Load distances and compute quality weights
             quality_weights = None
             if args.use_quality_weights:
                 dist_path = os.path.join(bank_dir, file_name_without_ext + '_distances.npy')
@@ -599,16 +575,8 @@ def denoise_syn(args):
                     
                     quality_weights = compute_quality_weights_distance(
                             distances, 
-                            alpha=distance_alpha
+                            alpha=args.alpha
                         )
-                    #PRINT STATEMENT
-                    #print(f"Using distance-based sampling (alpha={distance_alpha:.2f})")
-                    
-                    # Print statistics
-                    avg_weight = quality_weights.mean().item()
-                    max_weight = quality_weights.max().item()
-                    min_weight = quality_weights.min().item()
-                    # print(f"  Weight stats - Mean: {avg_weight:.4f}, Max: {max_weight:.4f}, Min: {min_weight:.4f}")
                 else:
                     print("Distance file not found, using uniform sampling")
 
@@ -640,8 +608,6 @@ def denoise_syn(args):
                             model.use_sigmoid = False
                             epoch=0
                         current_psnr = 10 * np.log10(1 / current_mse)
-                    #PRINT STATEMENT
-                    # print(f"  Epoch {epoch+1}/{args.epochs_per_iter} - PSNR: {current_psnr:.2f} dB")
                 
                 epoch+=1
 
@@ -694,18 +660,13 @@ if __name__ == "__main__":
         print(f"  Noise type: {args.nt}, level: {args.nl}")
         print(f"  Iterations: {args.num_iterations}, Epochs/iter: {args.epochs_per_iter}")
         
-        if args.progressive_growing:
-            nn_layers_list, _, _ = parse_iteration_params(args)
-            print(f"  Progressive Growing: ENABLED")
-            print(f"  Network layers per iteration: {nn_layers_list}")
-        else:
-            print(f"  Progressive Growing: DISABLED (6 layers for all iterations)")
+        nn_layers_list = parse_iteration_params(args)
+        print(f"  Network layers per iteration: {nn_layers_list}")
         
         if args.use_quality_weights:
             print(f"  Quality weighting: ENABLED")
-            _, _, distance_alphas_list = parse_iteration_params(args)
             print(f"  Sampling strategy: Distance-based")
-            print(f"  Distance alpha per iteration: {distance_alphas_list}")
+            print(f"  Distance alpha: {args.alpha}")
         else:
             print(f"  Quality weighting: DISABLED (uniform sampling)")
         
@@ -720,5 +681,3 @@ if __name__ == "__main__":
         construct_pixel_bank_real(args)
         print("Starting denoising using constructed pixel banks ...")
         denoise_real(args)
-
-    
