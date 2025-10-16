@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.optim.lr_scheduler import MultiStepLR
-from network import NetworkSyn, NetworkReal
+from src.network import NetworkSyn, NetworkReal
 from src.bank_creation import *
 
 import torchvision.transforms as transforms

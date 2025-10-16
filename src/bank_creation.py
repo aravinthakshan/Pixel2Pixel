@@ -6,7 +6,7 @@ import torch.nn.functional as F
 import torchvision.transforms as transforms
 from PIL import Image
 import numpy as np
-from utils import add_noise
+from src.utils import add_noise
 
 transform = transforms.Compose([transforms.ToTensor()])
 
