@@ -17,7 +17,9 @@ class TrainingPairsViewer:
         """
         # Load pixel bank
         print(f"Loading pixel bank from: {bank_path}")
-        bank_arr = np.load(bank_path)
+        # bank_arr = np.load(bank_path)
+        bank_arr = np.load(bank_path, allow_pickle=True)
+
         
         if bank_arr.ndim == 3:
             bank_arr = np.expand_dims(bank_arr, axis=-1)
