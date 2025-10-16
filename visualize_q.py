@@ -304,15 +304,21 @@ def visualize_training_pairs(bank_path, image_name, alpha=2.0,
         bank_values = pixel_banks.numpy()
         if C == 3:
             # Show RGB values
-            for c, color_name in enumerate(['R', 'G', 'B']):
-                ax.plot(range(K), bank_values[:, c], 'o-', alpha=0.7, label=color_name)
+            colors = ['red', 'green', 'blue']
+            for c, (color_name, color_val) in enumerate(zip(['R', 'G', 'B'], colors)):
+                ax.plot(range(K), bank_values[:, c], 'o-', alpha=0.7, label=color_name, color=color_val)
+                # Highlight selected samples for this channel
+                ax.plot(idx1, bank_values[idx1, c], 'o', markersize=12, 
+                       markeredgecolor='black', markeredgewidth=2, color=color_val, alpha=0.8)
+                ax.plot(idx2, bank_values[idx2, c], 's', markersize=12, 
+                       markeredgecolor='black', markeredgewidth=2, color=color_val, alpha=0.8)
         else:
             ax.plot(range(K), bank_values[:, 0], 'o-', alpha=0.7)
-        ax.plot(idx1, bank_values[idx1], 'ro', markersize=10)
-        ax.plot(idx2, bank_values[idx2], 'bo', markersize=10)
+            ax.plot(idx1, bank_values[idx1, 0], 'ro', markersize=10)
+            ax.plot(idx2, bank_values[idx2, 0], 'bs', markersize=10)
         ax.set_xlabel('Bank Index', fontsize=9)
         ax.set_ylabel('Pixel Value', fontsize=9)
-        ax.set_title('Bank Pixel Values', fontsize=10)
+        ax.set_title('Bank Pixel Values\n(○=pix1, □=pix2)', fontsize=10)
         if C == 3:
             ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3)
