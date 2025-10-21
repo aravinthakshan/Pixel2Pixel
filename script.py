@@ -9,6 +9,7 @@ args = parser.parse_args()
 noise_levels = [10, 25, 50]
 
 for nl in noise_levels:
+    print(f"\n=== NOISE TYPE: {args.noise_type.upper()} | NOISE LEVEL: {nl} ===\n")
     cmd = [
         "python","train.py",
         "--num_iterations","1",
@@ -16,11 +17,10 @@ for nl in noise_levels:
         "--epochs_per_iter","3000",
         "--gt_dir","GT",
         "--noisy_dir","Noisy",
-        "--nt",args.nt,
+        "--nt",args.noise_type,
         "--dataset",args.dataset,
         "--loss","L1",
         "--use_quality_weights","True",
         "--nl",str(nl)
     ]
-    print("Running:", " ".join(cmd))
     subprocess.run(cmd)
