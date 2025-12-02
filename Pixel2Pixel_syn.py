@@ -6,6 +6,7 @@ from PIL import Image
 from skimage import io
 import matplotlib.pyplot as plt
 from skimage.metrics import peak_signal_noise_ratio as compare_psnr, structural_similarity as compare_ssim
+import math
 
 import torch
 import torch.nn as nn
@@ -59,6 +60,36 @@ loss_type = args.loss
 
 transform = transforms.Compose([transforms.ToTensor()])
 
+# Poisson and Anscombe helpers (https://arxiv.org/abs/1511.02500)
+def anscombe_forward_from_scaled(y, peak) -> torch.Tensor:
+    """
+    y: scaled Poisson noisy image tensor in [0, 1]
+    peak: noise_level (lambda)
+    """
+    return 2.0 * torch.sqrt(torch.clamp(peak * y + 3.0 / 8.0, min=1e-8)) # clamped for numeric stability
+
+def get_anscombe_range(peak) -> float:
+    """
+    Compute min/max Anscombe values
+    Using math.sqrt since torch.sqrt expects tensors
+    """
+    A_min = 2.0 * math.sqrt(3.0 / 8.0)         # lambda = 0
+    A_max = 2.0 * math.sqrt(peak + 3.0 / 8.0)  # lambda = peak
+    return A_min.item(), A_max.item()
+
+def normalize_anscombe(A, peak) -> torch.Tensor:
+    A_min, A_max = get_anscombe_range(peak)
+    return (A-A_min)/(A_max - A_min + 1e-8)
+
+def denormalize_anscombe(A_norm, peak) -> torch.Tensor:
+    A_min, A_max = get_anscombe_range(peak)
+    return A_norm * (A_max - A_min) + A_min
+
+# helper to get NN output back to signal domain (scaled)(poisson case)
+def anscombe_inverse(A, peak) -> torch.Tensor:
+    lambda_hat = (A / 2.0) ** 2 - 3.0 / 8.0
+    x_hat = lambda_hat / peak
+    return torch.clamp(x_hat, 0, 1)  
 
 # -------------------------------
 # Function to add noise to an image
@@ -68,7 +99,9 @@ def add_noise(x, noise_level):
         noisy = x + torch.normal(0, noise_level / 255, x.shape)
         noisy = torch.clamp(noisy, 0, 1)
     elif noise_type == 'poiss':
-        noisy = torch.poisson(noise_level * x) / noise_level
+        noisy = torch.poisson(noise_level * x) / noise_level # same as y in helper functions
+        A = anscombe_forward_from_scaled(noisy, noise_level)
+        noisy = normalize_anscombe(A, noise_level)
     elif noise_type == 'saltpepper':
         prob = torch.rand_like(x)
         noisy = x.clone()
@@ -368,10 +401,21 @@ def train(model, optimizer, img_bank, quality_weights=None):
 #     optimizer.step()
 #     return loss.item()
 
+# helper for centralization of forward denoising
+def forward_denoise(model, noisy_img):
+    with torch.no_grad():
+        raw_output = model(noisy_img)
+
+        if noise_type == 'poiss':
+            A_pred = denormalize_anscombe(raw_output, noise_level)
+            x_hat = anscombe_inverse(A_pred, noise_level)
+            return x_hat
+        else:
+            return torch.clamp(raw_output, 0, 1)
 
 def test(model, noisy_img, clean_img):
     with torch.no_grad():
-        pred = torch.clamp(model(noisy_img), 0, 1)
+        pred = forward_denoise(model, noisy_img)
         mse_val = mse_loss(clean_img, pred).item()
         psnr = 10 * np.log10(1 / mse_val)
     return psnr, pred
@@ -467,14 +511,15 @@ def denoise_images():
                 
                 if (epoch + 1) % 200 == 0:
                     with torch.no_grad():
-                        current_pred = torch.clamp(model(noisy_img), 0, 1)
+                        current_pred = forward_denoise(model, noisy_img)
                         current_mse = mse_loss(clean_img_tensor, current_pred).item()
                         current_psnr = 10 * np.log10(1 / current_mse)
                     print(f"  Epoch {epoch+1}/{args.epochs_per_iter} - PSNR: {current_psnr:.2f} dB")
 
             # Get partially denoised image
             with torch.no_grad():
-                denoised_img = torch.clamp(model(noisy_img), 0, 1)
+                denoised_img = forward_denoise(model, noisy_img)
+                raw_output = model(noisy_img)
                 current_mse = mse_loss(clean_img_tensor, denoised_img).item()
                 current_psnr = 10 * np.log10(1 / current_mse)
             
@@ -484,7 +529,8 @@ def denoise_images():
             if iteration < args.num_iterations - 1:
                 print(f"Rebuilding pixel bank with partially denoised image...")
                 start_time = time.time()
-                topk, distances = construct_pixel_bank_from_image(denoised_img, file_name_without_ext, bank_dir)
+                # use raw_output for bank construction, since its in the same domain as training data
+                topk, distances = construct_pixel_bank_from_image(raw_output, file_name_without_ext, bank_dir)
                 elapsed = time.time() - start_time
                 print(f"Bank rebuilt in {elapsed:.2f} seconds. Shape: {topk.shape}")
 
@@ -495,6 +541,7 @@ def denoise_images():
         out_img_pil.save(out_img_save_path)
 
         noisy_img_pil = to_pil_image(noisy_img.squeeze(0))
+        # the noisy image being saved here is poisson after anscombe normalization
         noisy_img_save_path = os.path.join(args.out_image, os.path.splitext(image_file)[0] + '_noisy.png')
         noisy_img_pil.save(noisy_img_save_path)
 
