@@ -94,7 +94,7 @@ def train_syn(model, optimizer, img_bank, args, quality_weights=None):
     loss_f = nn.L1Loss() if args.loss == 'L1' else nn.MSELoss()
 
     if args.use_quality_weights:
-        print("Inside quality-weighted sampling")
+        # print("Inside quality-weighted sampling")
         # Sample based on quality weights
         flat_weights = quality_weights.view(-1, N)
         
