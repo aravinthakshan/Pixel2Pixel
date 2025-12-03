@@ -64,6 +64,53 @@ loss_type = args.loss
 
 transform = transforms.Compose([transforms.ToTensor()])
 
+# poisson helpers
+# compute nll loss on poisson rates
+def poisson_nll_loss(lambda_hat, target_counts, reduction='mean', eps=1e-8):
+    """
+        lambda_hat: predicted Poisson rates
+        target_counts: observed counts (non-negative integers)
+        loss = lambda_hat - y * log(lambda_hat + eps)
+        loss = λ - y*log(λ+ε)
+    """
+    lambda_hat = torch.clamp(lambda_hat, min=eps)
+    loss = lambda_hat - target_counts * torch.log(lambda_hat)
+    if reduction == 'mean':
+        return loss.mean()
+    elif reduction == 'sum':
+        return loss.sum()
+    else:
+        return loss
+
+# measures discrepancy between predicted rates and target counts
+def poisson_deviance(lambda_hat, target_counts, reduction='mean', eps=1e-8):
+    """
+        Poisson deviance = 2*( y*log(y/lambda_hat) - (y - lambda_hat) )
+    """
+    lambda_hat = torch.clamp(lambda_hat, min=eps)
+    y = target_counts
+    # using torch.where to handle y=0 => 0*log(0) = NaN
+    ratio_term = torch.where(y>0, y*torch.log(y / lambda_hat), torch.zeros_like(y))
+    dev = 2.0*(ratio_term - (y - lambda_hat))
+    if reduction == 'mean':
+        return dev.mean()
+    elif reduction == 'sum':
+        return dev.sum()
+    else:
+        return dev
+    
+# KL divergence between poission rates, per-patch distance prefers patches with similar underlying rates
+def poisson_sym_kl_rate(lambda_a, lambda_b, eps=1e-8):
+    """
+        Symmetric KL divergence rate between two Poisson distributions
+        KL(a || b) = a * log(a/b) + b - a
+    """
+
+    a = torch.clamp(lambda_a, min=eps)
+    b = torch.clamp(lambda_b, min=eps)
+    kl_ab = a * torch.log(a / b) + b - a
+    kl_ba = b * torch.log(b / a) + a - b
+    return kl_ab + kl_ba
 
 # Parse progressive parameters
 def parse_iteration_params():
@@ -94,7 +141,9 @@ def add_noise(x, noise_level):
         noisy = x + torch.normal(0, noise_level / 255, x.shape)
         noisy = torch.clamp(noisy, 0, 1)
     elif noise_type == 'poiss':
-        noisy = torch.poisson(noise_level * x) / noise_level
+        # produce imteger counts, unnormalized
+        counts = torch.poisson(noise_level * x).to(torch.float32)
+        noisy = counts
     elif noise_type == 'saltpepper':
         prob = torch.rand_like(x)
         noisy = x.clone()
@@ -172,13 +221,26 @@ def construct_pixel_bank_from_image(img_tensor, file_name_without_ext, bank_dir)
             )
             img_center = img_center[..., center_offset:center_offset + blk_sz, center_offset:center_offset + blk_sz]
 
-            if args.loss == 'L2':
-                distance = torch.sum((img_center - patch_windows) ** 2, dim=1)
-            elif args.loss == 'L1':
-                distance = torch.sum(torch.abs(img_center - patch_windows), dim=1)
-            else:
-                raise ValueError(f"Unsupported loss type: {loss_type}")
+            if noise_type == 'poiss':
 
+                # patch_windows: [b, c*k1*k2, k3*k4, h, w]
+                # img_center: [b, c*k1*k2, 1, h, w]
+                # local rate estimation => per-patch mean
+                center_mean = img_center.mean(dim=1)
+                patch_mean = patch_windows.mean(dim=1)
+                # expand center mean to match patch mean shape
+                center_mean_exp = center_mean.expand(-1, patch_mean.shape[1], -1, -1)
+                # compute symmetric KL per neighbour - how likely 2 patches share same Poisson rate
+                distance = poisson_sym_kl_rate(center_mean_exp, patch_mean)
+            else:
+                if args.loss == 'L2':
+                    distance = torch.sum((img_center - patch_windows) ** 2, dim=1)
+                elif args.loss == 'L1':
+                    distance = torch.sum(torch.abs(img_center - patch_windows), dim=1)
+                else:
+                    raise ValueError(f"Unsupported loss type: {loss_type}")
+
+            # Poisson-aware topk's
             topk_distances, sort_indices = torch.topk(
                 distance,
                 k=NUM_NEIGHBORS,
@@ -269,6 +331,9 @@ class Network(nn.Module):
             x = self.act(conv_layer(x))
         
         x = self.conv_final(x)
+        if noise_type == 'poiss':
+            # need scores not [0,1] bound values
+            return F.softplus(x, beta=1.0)
         if self.use_sigmoid:
             return torch.sigmoid(x)
         return x
@@ -291,9 +356,16 @@ def mse_loss(gt: torch.Tensor, pred: torch.Tensor) -> torch.Tensor:
 loss_f = nn.L1Loss() if args.loss == 'L1' else nn.MSELoss()
 
 def loss_func(img1, img2, loss_f=nn.MSELoss()):
-    pred1 = model(img1)
-    loss = loss_f(img2, pred1)
-    return loss
+    if noise_type == 'poiss':
+        # model outputs normalized rates, symbolized as r_hat >0
+        r_hat = model(img1)
+        lambda_hat = r_hat * noise_level
+        # img2 is counts already
+        return poisson_nll_loss(lambda_hat, img2, reduction='mean')
+    else:
+        pred1 = model(img1)
+        loss = loss_f(img2, pred1)
+        return loss
 
 # -------------------------------
 def compute_quality_weights_distance(distances, alpha=2.0):
@@ -354,7 +426,18 @@ def train(model, optimizer, img_bank, quality_weights=None):
     img2 = torch.gather(img_bank, 0, index2_exp)
     img2 = img2.permute(0, 3, 1, 2)
 
-    loss = loss_func(img1, img2, loss_f)
+    if noise_type == 'poiss':
+        # img1 is counts: normalize for model input
+        img1_input = img1 / noise_level   # normalized counts
+        # img2 should be counts targets (do not normalize for loss)
+        img2_target = img2
+        loss = loss_func(img1_input, img2_target, loss_f)
+    else:
+        img1_input = img1
+        img2_target = img2
+        loss = loss_func(img1_input, img2_target, loss_f)
+
+    # loss = loss_func(img1, img2, loss_f)
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
@@ -363,10 +446,18 @@ def train(model, optimizer, img_bank, quality_weights=None):
 
 def test(model, noisy_img, clean_img):
     with torch.no_grad():
-        pred = torch.clamp(model(noisy_img), 0, 1)
-        mse_val = mse_loss(clean_img, pred).item()
+        if noise_type == 'poiss':
+            # noisy_img passed in should be counts normalized -> model input (counts / peak)
+            r_hat = model(noisy_img)                 # normalized rate
+            lambda_hat = r_hat * noise_level         # predicted counts
+            pred_signal = torch.clamp(lambda_hat / noise_level, 0, 1)  # convert to x_hat in [0,1]
+        else:
+            out = model(noisy_img)
+            pred_signal = torch.clamp(out, 0, 1)
+        mse_val = mse_loss(clean_img, pred_signal).item()
         psnr = 10 * np.log10(1 / mse_val)
-    return psnr, pred
+    return psnr, pred_signal
+
 
 # -------------------------------
 def denoise_images():
@@ -462,7 +553,10 @@ def denoise_images():
                 else:
                     print("Distance file not found, using uniform sampling")
 
-            noisy_img = img_bank[0].unsqueeze(0).permute(0, 3, 1, 2)
+            if noise_type == 'poiss':
+                noisy_img = (img_bank[0].unsqueeze(0).permute(0, 3, 1, 2)) / noise_level
+            else:
+                noisy_img = img_bank[0].unsqueeze(0).permute(0, 3, 1, 2)
 
             # Reset scheduler for each iteration
             scheduler = MultiStepLR(optimizer, 
@@ -503,10 +597,32 @@ def denoise_images():
             print(f"Iteration {iteration + 1} complete - PSNR: {current_psnr:.2f} dB")
             
             # Rebuild pixel bank using partially denoised image (except for last iteration)
+            # if iteration < args.num_iterations - 1:
+            #     print(f"Rebuilding pixel bank with partially denoised image...")
+            #     start_time = time.time()
+            #     topk, distances = construct_pixel_bank_from_image(denoised_img, file_name_without_ext, bank_dir)
+            #     elapsed = time.time() - start_time
+            #     print(f"Bank rebuilt in {elapsed:.2f} seconds. Shape: {topk.shape}")
+
             if iteration < args.num_iterations - 1:
                 print(f"Rebuilding pixel bank with partially denoised image...")
                 start_time = time.time()
-                topk, distances = construct_pixel_bank_from_image(denoised_img, file_name_without_ext, bank_dir)
+
+                # For Poisson pipeline: model(noisy_img) returns normalized rate r_hat (>=0).
+                # convert it to counts (lambda_hat = r_hat * noise_level) and pass counts
+                if noise_type == 'poiss':
+                    with torch.no_grad():
+                        # r_hat shape: (1, C, H, W) because noisy_img fed to model was normalized counts/peak
+                        r_hat = model(noisy_img)                            # normalized rates
+                        lambda_hat_counts = (r_hat * noise_level).detach()  # predicted counts; keep on device
+                        # IMPORTANT: construct_pixel_bank_from_image expects input shape [1,C,H,W]
+                        img_for_bank = lambda_hat_counts
+                else:
+                    # For non-Poisson, denoised_img is already in the same domain as original bank construction
+                    img_for_bank = denoised_img
+
+                # Build bank from the image in the *correct* domain
+                topk, distances = construct_pixel_bank_from_image(img_for_bank, file_name_without_ext, bank_dir)
                 elapsed = time.time() - start_time
                 print(f"Bank rebuilt in {elapsed:.2f} seconds. Shape: {topk.shape}")
             
@@ -516,7 +632,13 @@ def denoise_images():
         out_img_save_path = os.path.join(args.out_image, os.path.splitext(image_file)[0] + '.png')
         out_img_pil.save(out_img_save_path)
 
-        noisy_img_pil = to_pil_image(noisy_img.squeeze(0))
+        if noise_type == 'poiss':
+            noisy_vis = (img_bank[0] / noise_level).permute(2,0,1)  # make sure dims match
+            noisy_img_pil = to_pil_image(noisy_vis.cpu())
+        else:
+            noisy_img_pil = to_pil_image(noisy_img.squeeze(0))
+
+        # noisy_img_pil = to_pil_image(noisy_img.squeeze(0))
         noisy_img_save_path = os.path.join(args.out_image, os.path.splitext(image_file)[0] + '_noisy.png')
         noisy_img_pil.save(noisy_img_save_path)
 
