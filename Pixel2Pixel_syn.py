@@ -467,7 +467,8 @@ def denoise_images():
                                              int(args.epochs_per_iter*0.67), 
                                              int(args.epochs_per_iter*0.83)], 
                                    gamma=0.5)
-
+            
+            current_mse = 0
             # Train for epochs_per_iter
             for epoch in range(args.epochs_per_iter):
                 train(model, optimizer, img_bank, quality_weights)
